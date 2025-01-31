@@ -2,6 +2,209 @@
 Changelog for package moveit_simple_controller_manager
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+2.12.0 (2024-11-29)
+-------------------
+* Enhancement/use hpp for headers (`#3113 <https://github.com/ros-planning/moveit2/issues/3113>`_)
+* fix parameter namespacing for gripper controller (`#3023 <https://github.com/ros-planning/moveit2/issues/3023>`_)
+* Contributors: Michael Ferguson, Tom Noble
+
+2.11.0 (2024-09-16)
+-------------------
+
+2.10.0 (2024-06-13)
+-------------------
+* Migrate ros-planning org to moveit (`#2847 <https://github.com/moveit/moveit2/issues/2847>`_)
+  * Rename github.com/ros-planning -> github.com/moveit
+  * Rename ros-planning.github.io -> moveit.github.io
+  * Rename ros-planning organization in docker and CI workflow files
+  - ghcr.io/ros-planning -> ghcr.io/moveit
+  - github.repository == 'moveit/*''
+* Unify log names (`#2720 <https://github.com/moveit/moveit2/issues/2720>`_)
+* CMake format and lint in pre-commit (`#2683 <https://github.com/moveit/moveit2/issues/2683>`_)
+* Contributors: Robert Haschke, Sebastian Jahr, Tyler Weaver
+
+2.9.0 (2024-01-09)
+------------------
+* Node logging for the rest of MoveIt (`#2599 <https://github.com/ros-planning/moveit2/issues/2599>`_)
+* Add new clang-tidy style rules (`#2177 <https://github.com/ros-planning/moveit2/issues/2177>`_)
+* Merge branch 'main' into dependabot/github_actions/SonarSource/sonarcloud-github-c-cpp-2
+* Contributors: Sebastian Jahr, Tyler Weaver
+
+2.8.0 (2023-09-10)
+------------------
+
+2.7.4 (2023-05-18)
+------------------
+
+2.7.3 (2023-04-24)
+------------------
+* Replace Variable PROJECT_NAME in CMakeLists.txt with the actual name (`#2020 <https://github.com/ros-planning/moveit2/issues/2020>`_)
+* Contributors: Shobuj Paul
+
+2.7.2 (2023-04-18)
+------------------
+
+2.7.1 (2023-03-23)
+------------------
+* Fix member naming (`#1949 <https://github.com/ros-planning/moveit2/issues/1949>`_)
+  * Update clang-tidy rules for readability-identifier-naming
+  Co-authored-by: Sebastian Jahr <sebastian.jahr@picknik.ai>
+* Contributors: Robert Haschke
+
+2.7.0 (2023-01-29)
+------------------
+* converted characters from string format to character format (`#1881 <https://github.com/ros-planning/moveit2/issues/1881>`_)
+* Fix BSD license in package.xml (`#1796 <https://github.com/ros-planning/moveit2/issues/1796>`_)
+  * fix BSD license in package.xml
+  * this must also be spdx compliant
+* Add braces around blocks. (`#999 <https://github.com/ros-planning/moveit2/issues/999>`_)
+* Use emulated time in action-based controller (`#899 <https://github.com/ros-planning/moveit2/issues/899>`_)
+* Fix clang-tidy issues (`#1706 <https://github.com/ros-planning/moveit2/issues/1706>`_)
+  * Blindly apply automatic clang-tidy fixes
+  * Exemplarily cleanup a few automatic clang-tidy fixes
+  * Clang-tidy fixups
+  * Missed const-ref fixups
+  * Fix unsupported non-const -> const
+  * More fixes
+  Co-authored-by: Henning Kayser <henningkayser@picknik.ai>
+* Contributors: Christian Henkel, Cory Crean, Gaël Écorchard, Robert Haschke, Sameer Gupta
+
+2.6.0 (2022-11-10)
+------------------
+* Merge PR `#1553 <https://github.com/ros-planning/moveit2/issues/1553>`_: Improve cmake files
+* Use standard exported targets: export\_${PROJECT_NAME} -> ${PROJECT_NAME}Targets
+* Improve CMake usage (`#1550 <https://github.com/ros-planning/moveit2/issues/1550>`_)
+* Support chained controllers (`#1482 <https://github.com/ros-planning/moveit2/issues/1482>`_)
+  * fix controller list if chained controllers exist
+  * add comments and clean code
+  * added additional comments
+  * fix formatting
+  * fix white space
+  * add const reference and chhnage variable name
+  * simplify logic to only  work with one layer chain
+  * Don't return false when not finding optional parameter
+  * Update moveit_ros/perception/pointcloud_octomap_updater/src/pointcloud_octomap_updater.cpp
+  Co-authored-by: AndyZe <andyz@utexas.edu>
+  * add debug information
+  * print controller names
+  * print controllers with not known type
+  * load controller dependencies
+  * start chained controllers in switch
+  * reverse order of activate controllers
+  * prevent stoppping controller twice
+  * revert all debug changes
+  * add ROS error if a controller chains to more than one
+  * use loop to index chained connections
+  * update ros_control
+  * add empty controller allocator for admittance controller
+  * fix plugin xml
+  * Update moveit_plugins/moveit_ros_control_interface/src/controller_manager_plugin.cpp
+  Co-authored-by: AndyZe <andyz@utexas.edu>
+  * Update moveit_plugins/moveit_ros_control_interface/src/controller_manager_plugin.cpp
+  Co-authored-by: AndyZe <andyz@utexas.edu>
+  * Update moveit_plugins/moveit_ros_control_interface/src/controller_manager_plugin.cpp
+  Co-authored-by: AndyZe <andyz@utexas.edu>
+  * Update moveit_plugins/moveit_ros_control_interface/src/controller_manager_plugin.cpp
+  Co-authored-by: AndyZe <andyz@utexas.edu>
+  * fix map indexing
+  * add comment
+  * Update moveit_plugins/moveit_ros_control_interface/src/controller_manager_plugin.cpp
+  Co-authored-by: Tyler Weaver <squirrel428@protonmail.com>
+  * Typos
+  Co-authored-by: JafarAbdi <cafer.abdi@gmail.com>
+  Co-authored-by: Jafar <jafar.uruc@gmail.com>
+  Co-authored-by: AndyZe <andyz@utexas.edu>
+  Co-authored-by: Vatan Aksoy Tezer <vatan@picknik.ai>
+  Co-authored-by: Tyler Weaver <squirrel428@protonmail.com>
+  Co-authored-by: AndyZe <zelenak@picknik.ai>
+* Contributors: Paul Gesel, Robert Haschke, Sebastian Jahr
+
+2.5.3 (2022-07-28)
+------------------
+
+2.5.2 (2022-07-18)
+------------------
+* Remove unnecessary rclcpp.hpp includes (`#1333 <https://github.com/ros-planning/moveit2/issues/1333>`_)
+* Merge pull request `#3106 <https://github.com/ros-planning/moveit2/issues/3106>`_ from v4hn/pr-master-bind-them-all / banish bind()
+* banish bind()
+* Contributors: Jafar, Michael Görner, v4hn
+
+2.5.1 (2022-05-31)
+------------------
+
+2.5.0 (2022-05-26)
+------------------
+* Enable cppcheck (`#1224 <https://github.com/ros-planning/moveit2/issues/1224>`_)
+  Co-authored-by: jeoseo <jeongwooseo2012@gmail.com>
+* Make moveit_common a 'depend' rather than 'build_depend' (`#1226 <https://github.com/ros-planning/moveit2/issues/1226>`_)
+* RCLCPP Upgrade Bugfixes (`#1181 <https://github.com/ros-planning/moveit2/issues/1181>`_)
+* Merge https://github.com/ros-planning/moveit/commit/a25515b73d682df03ed3eccd839110c296aa79fc
+* 1.1.9
+* 1.1.8
+* 1.1.7
+* feat(simple_controller_manager): add `max_effort` parameter to GripperCommand action (`#2984 <https://github.com/ros-planning/moveit2/issues/2984>`_)
+  This commit adds the `max_effort` parameter to the GripperCommand
+  declaration in the `controller_list` (see issue `#2956 <https://github.com/ros-planning/moveit2/issues/2956>`_). This value is
+  only used when effort is set in the requested gripper trajectory.
+  Co-authored-by: Jafar Abdi <cafer.abdi@gmail.com>
+* Switch to std::bind (`#2967 <https://github.com/ros-planning/moveit2/issues/2967>`_)
+  * boost::bind -> std::bind
+  grep -rlI --exclude-dir=.git "boost::bind" | xargs sed -i 's/boost::bind/std::bind/g'
+  * Convert bind placeholders
+  grep -rlI --exclude-dir=.git " _[0-9]" | xargs sed -i 's/ _\([0-9]\)/ std::placeholders::_\1/g'
+  * Update bind include header
+  grep -rlI --exclude-dir=.git "boost/bind" | xargs sed -i 's#boost/bind.hpp#functional#'
+* 1.1.6
+* Contributors: Abishalini, David V. Lu!!, Jafar, Jochen Sprickerhof, Rick Staa, Robert Haschke, jeoseo
+
+2.4.0 (2022-01-20)
+------------------
+* moveit_build_options()
+  Declare common build options like CMAKE_CXX_STANDARD, CMAKE_BUILD_TYPE,
+  and compiler options (namely warning flags) once.
+  Each package depending on moveit_core can use these via moveit_build_options().
+* Contributors: Robert Haschke
+
+2.3.2 (2021-12-29)
+------------------
+
+2.3.1 (2021-12-23)
+------------------
+* Add codespell to precommit, fix A LOT of spelling mistakes (`#934 <https://github.com/ros-planning/moveit2/issues/934>`_)
+* Make controller management logic more tolerant of missing or late ros2_control nodes (`#792 <https://github.com/ros-planning/moveit2/issues/792>`_)
+* Clang-tidy fixes (`#596 <https://github.com/ros-planning/moveit2/issues/596>`_)
+* Enforce package.xml format 3 Schema (`#779 <https://github.com/ros-planning/moveit2/issues/779>`_)
+* Update Maintainers of MoveIt package (`#697 <https://github.com/ros-planning/moveit2/issues/697>`_)
+* clang-tidy: modernize-make-shared, modernize-make-unique (`#2762 <https://github.com/ros-planning/moveit/issues/2762>`_)
+* controller manager: enclose name in quotes (`#2761 <https://github.com/ros-planning/moveit/issues/2761>`_)
+* Contributors: Dave Coleman, David V. Lu!!, G.A. vd. Hoorn, Henning Kayser, Joseph Schornak, Robert Haschke, pvanlaar
+
+2.3.0 (2021-10-08)
+------------------
+* Fix cmake warnings (`#690 <https://github.com/ros-planning/moveit2/issues/690>`_)
+  * Fix -Wformat-security
+  * Fix -Wunused-variable
+  * Fix -Wunused-lambda-capture
+  * Fix -Wdeprecated-declarations
+  * Fix clang-tidy, readability-identifier-naming in moveit_kinematics
+* follow_joint_trajectory_controller_handle: publish new multi_dof_trajectory field (`#492 <https://github.com/ros-planning/moveit2/issues/492>`_)
+* Contributors: Henning Kayser, Jafar Abdi, David V. Lu
+
+2.2.1 (2021-07-12)
+------------------
+
+2.2.0 (2021-06-30)
+------------------
+* Enable Rolling and Galactic CI (`#494 <https://github.com/ros-planning/moveit2/issues/494>`_)
+* [sync] MoveIt's master branch up-to https://github.com/ros-planning/moveit/commit/0d0a6a171b3fbea97a0c4f284e13433ba66a4ea4
+* Contributors: Henning Kayser, JafarAbdi, Tyler Weaver, Vatan Aksoy Tezer
+
+2.1.4 (2021-05-31)
+------------------
+
+2.1.3 (2021-05-22)
+------------------
+
 2.1.2 (2021-04-20)
 ------------------
 

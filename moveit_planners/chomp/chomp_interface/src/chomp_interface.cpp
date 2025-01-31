@@ -34,44 +34,56 @@
 
 /* Author: E. Gil Jones */
 
-#include <chomp_interface/chomp_interface.h>
+#include <chomp_interface/chomp_interface.hpp>
+#include <moveit/utils/logger.hpp>
 
 namespace chomp_interface
 {
-CHOMPInterface::CHOMPInterface(const ros::NodeHandle& nh) : ChompPlanner(), nh_(nh)
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.planners.chomp");
+}
+}  // namespace
+
+CHOMPInterface::CHOMPInterface(const rclcpp::Node::SharedPtr& node) : ChompPlanner(), node_(node)
 {
   loadParams();
 }
 
 void CHOMPInterface::loadParams()
 {
-  nh_.param("planning_time_limit", params_.planning_time_limit_, 10.0);
-  nh_.param("max_iterations", params_.max_iterations_, 200);
-  nh_.param("max_iterations_after_collision_free", params_.max_iterations_after_collision_free_, 5);
-  nh_.param("smoothness_cost_weight", params_.smoothness_cost_weight_, 0.1);
-  nh_.param("obstacle_cost_weight", params_.obstacle_cost_weight_, 1.0);
-  nh_.param("learning_rate", params_.learning_rate_, 0.01);
+  node_->get_parameter_or("chomp.planning_time_limit", params_.planning_time_limit_, 10.0);
+  node_->get_parameter_or("chomp.max_iterations", params_.max_iterations_, 200);
+  node_->get_parameter_or("chomp.max_iterations_after_collision_free", params_.max_iterations_after_collision_free_, 5);
 
-  // nh_.param("add_randomness", params_.add_randomness_, false);
-  nh_.param("smoothness_cost_velocity", params_.smoothness_cost_velocity_, 0.0);
-  nh_.param("smoothness_cost_acceleration", params_.smoothness_cost_acceleration_, 1.0);
-  nh_.param("smoothness_cost_jerk", params_.smoothness_cost_jerk_, 0.0);
-  // nh_.param("hmc_discretization", params_.hmc_discretization_, 0.01);
-  // nh_.param("hmc_stochasticity", params_.hmc_stochasticity_, 0.01);
-  // nh_.param("hmc_annealing_factor", params_.hmc_annealing_factor_, 0.99);
-  // nh_.param("use_hamiltonian_monte_carlo", params_.use_hamiltonian_monte_carlo_, false);
-  nh_.param("ridge_factor", params_.ridge_factor_, 0.0);
-  nh_.param("use_pseudo_inverse", params_.use_pseudo_inverse_, false);
-  nh_.param("pseudo_inverse_ridge_factor", params_.pseudo_inverse_ridge_factor_, 1e-4);
+  node_->get_parameter_or("chomp.smoothness_cost_weight", params_.smoothness_cost_weight_, 0.1);
+  node_->get_parameter_or("chomp.obstacle_cost_weight", params_.obstacle_cost_weight_, 1.0);
+  node_->get_parameter_or("chomp.learning_rate", params_.learning_rate_, 0.01);
 
-  nh_.param("joint_update_limit", params_.joint_update_limit_, 0.1);
-  nh_.param("collision_clearence", params_.min_clearence_, 0.2);
-  nh_.param("collision_threshold", params_.collision_threshold_, 0.07);
-  // nh_.param("random_jump_amount", params_.random_jump_amount_, 1.0);
-  nh_.param("use_stochastic_descent", params_.use_stochastic_descent_, true);
-  nh_.param("trajectory_initialization_method", params_.trajectory_initialization_method_,
-            std::string("quintic-spline"));
-  nh_.param("enable_failure_recovery", params_.enable_failure_recovery_, false);
-  nh_.param("max_recovery_attempts", params_.max_recovery_attempts_, 5);
+  node_->get_parameter_or("chomp.smoothness_cost_velocity", params_.smoothness_cost_velocity_, 0.0);
+  node_->get_parameter_or("chomp.smoothness_cost_acceleration", params_.smoothness_cost_acceleration_, 1.0);
+  node_->get_parameter_or("chomp.smoothness_cost_jerk", params_.smoothness_cost_jerk_, 0.0);
+  node_->get_parameter_or("chomp.ridge_factor", params_.ridge_factor_, 0.0);
+  node_->get_parameter_or("chomp.use_pseudo_inverse", params_.use_pseudo_inverse_, false);
+  node_->get_parameter_or("chomp.pseudo_inverse_ridge_factor", params_.pseudo_inverse_ridge_factor_, 1e-4);
+
+  node_->get_parameter_or("chomp.joint_update_limit", params_.joint_update_limit_, 0.1);
+  node_->get_parameter_or("chomp.collision_clearance", params_.min_clearance_, 0.2);
+  node_->get_parameter_or("chomp.collision_threshold", params_.collision_threshold_, 0.07);
+  node_->get_parameter_or("chomp.use_stochastic_descent", params_.use_stochastic_descent_, true);
+  params_.trajectory_initialization_method_ = "quintic-spline";
+  std::string method;
+  if (node_->get_parameter("chomp.trajectory_initialization_method", method) &&
+      !params_.setTrajectoryInitializationMethod(method))
+  {
+    RCLCPP_ERROR(getLogger(),
+                 "Attempted to set trajectory_initialization_method to invalid value '%s'. Using default '%s' "
+                 "instead.",
+                 method.c_str(), params_.trajectory_initialization_method_.c_str());
+  }
+  node_->get_parameter_or("chomp.enable_failure_recovery", params_.enable_failure_recovery_, false);
+  node_->get_parameter_or("chomp.max_recovery_attempts", params_.max_recovery_attempts_, 5);
 }
 }  // namespace chomp_interface

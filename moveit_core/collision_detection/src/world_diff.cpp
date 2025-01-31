@@ -34,8 +34,8 @@
 
 /* Author: Acorn Pooley, Ioan Sucan */
 
-#include <moveit/collision_detection/world_diff.h>
-#include <boost/bind.hpp>
+#include <moveit/collision_detection/world_diff.hpp>
+#include <functional>
 
 namespace collision_detection
 {
@@ -52,7 +52,8 @@ WorldDiff::WorldDiff()
 
 WorldDiff::WorldDiff(const WorldPtr& world) : world_(world)
 {
-  observer_handle_ = world->addObserver(boost::bind(&WorldDiff::notify, this, _1, _2));
+  observer_handle_ =
+      world->addObserver([this](const World::ObjectConstPtr& object, World::Action action) { notify(object, action); });
 }
 
 WorldDiff::WorldDiff(WorldDiff& other)
@@ -63,7 +64,8 @@ WorldDiff::WorldDiff(WorldDiff& other)
     changes_ = other.changes_;
 
     WorldWeakPtr(world).swap(world_);
-    observer_handle_ = world->addObserver(boost::bind(&WorldDiff::notify, this, _1, _2));
+    observer_handle_ = world->addObserver(
+        [this](const World::ObjectConstPtr& object, World::Action action) { notify(object, action); });
   }
 }
 
@@ -87,7 +89,8 @@ void WorldDiff::reset(const WorldPtr& world)
     old_world->removeObserver(observer_handle_);
 
   WorldWeakPtr(world).swap(world_);
-  observer_handle_ = world->addObserver(boost::bind(&WorldDiff::notify, this, _1, _2));
+  observer_handle_ =
+      world->addObserver([this](const World::ObjectConstPtr& object, World::Action action) { notify(object, action); });
 }
 
 void WorldDiff::setWorld(const WorldPtr& world)
@@ -101,7 +104,8 @@ void WorldDiff::setWorld(const WorldPtr& world)
 
   WorldWeakPtr(world).swap(world_);
 
-  observer_handle_ = world->addObserver(boost::bind(&WorldDiff::notify, this, _1, _2));
+  observer_handle_ =
+      world->addObserver([this](const World::ObjectConstPtr& object, World::Action action) { notify(object, action); });
   world->notifyObserverAllObjects(observer_handle_, World::CREATE | World::ADD_SHAPE);
 }
 
@@ -114,9 +118,13 @@ void WorldDiff::notify(const World::ObjectConstPtr& obj, World::Action action)
 {
   World::Action& a = changes_[obj->id_];
   if (action == World::DESTROY)
+  {
     a = World::DESTROY;
+  }
   else
+  {
     a = a | action;
+  }
 }
 
 }  // end of namespace collision_detection

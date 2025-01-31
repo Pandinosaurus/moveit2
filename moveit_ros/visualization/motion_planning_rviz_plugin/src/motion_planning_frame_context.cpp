@@ -33,11 +33,11 @@
  *********************************************************************/
 
 /* Author: Ioan Sucan */
-#include <moveit/warehouse/planning_scene_storage.h>
-#include <moveit/warehouse/constraints_storage.h>
-#include <moveit/warehouse/state_storage.h>
-#include <moveit/motion_planning_rviz_plugin/motion_planning_frame.h>
-#include <moveit/motion_planning_rviz_plugin/motion_planning_display.h>
+#include <moveit/warehouse/planning_scene_storage.hpp>
+#include <moveit/warehouse/constraints_storage.hpp>
+#include <moveit/warehouse/state_storage.hpp>
+#include <moveit/motion_planning_rviz_plugin/motion_planning_frame.hpp>
+#include <moveit/motion_planning_rviz_plugin/motion_planning_display.hpp>
 
 #include <rviz_common/display_context.hpp>
 #include <rviz_common/window_manager_interface.hpp>
@@ -49,12 +49,23 @@
 
 namespace moveit_rviz_plugin
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_ros_visualization.motion_planning_frame_context");
 
 void MotionPlanningFrame::databaseConnectButtonClicked()
 {
-  planning_display_->addBackgroundJob(boost::bind(&MotionPlanningFrame::computeDatabaseConnectButtonClicked, this),
-                                      "connect to database");
+  planning_display_->addBackgroundJob([this] { computeDatabaseConnectButtonClicked(); }, "connect to database");
+}
+
+void MotionPlanningFrame::planningPipelineIndexChanged(int index)
+{
+  // Refresh planner interface description for selected pipeline
+  if (index >= 0 && static_cast<size_t>(index) < planner_descriptions_.size())
+  {
+    // Set the selected pipeline id
+    if (move_group_)
+      move_group_->setPlanningPipelineId(planner_descriptions_[index].pipeline_id);
+
+    populatePlannerDescription(planner_descriptions_[index]);
+  }
 }
 
 void MotionPlanningFrame::planningAlgorithmIndexChanged(int index)
@@ -64,6 +75,7 @@ void MotionPlanningFrame::planningAlgorithmIndexChanged(int index)
     planner_id = "";
 
   ui_->planner_param_treeview->setPlannerId(planner_id);
+
   if (move_group_)
     move_group_->setPlannerId(planner_id);
 }
@@ -93,52 +105,47 @@ void MotionPlanningFrame::resetDbButtonClicked()
           QMessageBox::Yes | QMessageBox::No) == QMessageBox::No)
     return;
 
-  planning_display_->addBackgroundJob(
-      boost::bind(&MotionPlanningFrame::computeResetDbButtonClicked, this, response.toStdString()), "reset database");
+  planning_display_->addBackgroundJob([this, db = response.toStdString()] { computeResetDbButtonClicked(db); },
+                                      "reset database");
 }
 
 void MotionPlanningFrame::computeDatabaseConnectButtonClicked()
 {
-  RCLCPP_INFO(LOGGER, "Connect to database: {host: %s, port: %d}", ui_->database_host->text().toStdString().c_str(),
+  RCLCPP_INFO(logger_, "Connect to database: {host: %s, port: %d}", ui_->database_host->text().toStdString().c_str(),
               ui_->database_port->value());
   if (planning_scene_storage_)
   {
     planning_scene_storage_.reset();
     robot_state_storage_.reset();
     constraints_storage_.reset();
-    planning_display_->addMainLoopJob(
-        boost::bind(&MotionPlanningFrame::computeDatabaseConnectButtonClickedHelper, this, 1));
+    planning_display_->addMainLoopJob([this] { computeDatabaseConnectButtonClickedHelper(1); });
   }
   else
   {
-    planning_display_->addMainLoopJob(
-        boost::bind(&MotionPlanningFrame::computeDatabaseConnectButtonClickedHelper, this, 2));
+    planning_display_->addMainLoopJob([this] { computeDatabaseConnectButtonClickedHelper(2); });
     try
     {
       warehouse_ros::DatabaseConnection::Ptr conn = moveit_warehouse::loadDatabase(node_);
       conn->setParams(ui_->database_host->text().toStdString(), ui_->database_port->value(), 5.0);
       if (conn->connect())
       {
-        planning_scene_storage_.reset(new moveit_warehouse::PlanningSceneStorage(conn));
-        robot_state_storage_.reset(new moveit_warehouse::RobotStateStorage(conn));
-        constraints_storage_.reset(new moveit_warehouse::ConstraintsStorage(conn));
+        planning_scene_storage_ = std::make_shared<moveit_warehouse::PlanningSceneStorage>(conn);
+        robot_state_storage_ = std::make_shared<moveit_warehouse::RobotStateStorage>(conn);
+        constraints_storage_ = std::make_shared<moveit_warehouse::ConstraintsStorage>(conn);
       }
       else
       {
-        planning_display_->addMainLoopJob(
-            boost::bind(&MotionPlanningFrame::computeDatabaseConnectButtonClickedHelper, this, 3));
+        planning_display_->addMainLoopJob([this] { computeDatabaseConnectButtonClickedHelper(3); });
         return;
       }
     }
     catch (std::exception& ex)
     {
-      planning_display_->addMainLoopJob(
-          boost::bind(&MotionPlanningFrame::computeDatabaseConnectButtonClickedHelper, this, 3));
-      RCLCPP_ERROR(LOGGER, "%s", ex.what());
+      planning_display_->addMainLoopJob([this] { computeDatabaseConnectButtonClickedHelper(3); });
+      RCLCPP_ERROR(logger_, "%s", ex.what());
       return;
     }
-    planning_display_->addMainLoopJob(
-        boost::bind(&MotionPlanningFrame::computeDatabaseConnectButtonClickedHelper, this, 4));
+    planning_display_->addMainLoopJob([this] { computeDatabaseConnectButtonClickedHelper(4); });
   }
 }
 
@@ -192,8 +199,7 @@ void MotionPlanningFrame::computeDatabaseConnectButtonClickedHelper(int mode)
     if (move_group_)
     {
       move_group_->setConstraintsDatabase(ui_->database_host->text().toStdString(), ui_->database_port->value());
-      planning_display_->addBackgroundJob(boost::bind(&MotionPlanningFrame::populateConstraintsList, this),
-                                          "populateConstraintsList");
+      planning_display_->addBackgroundJob([this]() { populateConstraintsList(); }, "populateConstraintsList");
     }
   }
 }
@@ -201,10 +207,16 @@ void MotionPlanningFrame::computeDatabaseConnectButtonClickedHelper(int mode)
 void MotionPlanningFrame::computeResetDbButtonClicked(const std::string& db)
 {
   if (db == "Constraints" && constraints_storage_)
+  {
     constraints_storage_->reset();
+  }
   else if (db == "Robot States" && robot_state_storage_)
+  {
     robot_state_storage_->reset();
+  }
   else if (db == "Planning Scenes")
+  {
     planning_scene_storage_->reset();
+  }
 }
 }  // namespace moveit_rviz_plugin

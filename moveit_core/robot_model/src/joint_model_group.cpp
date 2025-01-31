@@ -35,14 +35,16 @@
 
 /* Author: Ioan Sucan, Dave Coleman */
 
-#include <moveit/robot_model/robot_model.h>
-#include <moveit/robot_model/joint_model_group.h>
-#include <moveit/robot_model/revolute_joint_model.h>
-#include <moveit/exceptions/exceptions.h>
-#include <boost/lexical_cast.hpp>
+#include <moveit/robot_model/robot_model.hpp>
+#include <moveit/robot_model/joint_model_group.hpp>
+#include <moveit/robot_model/revolute_joint_model.hpp>
+#include <moveit/exceptions/exceptions.hpp>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
 #include <algorithm>
+#include <moveit/utils/logger.hpp>
+
 #include "order_robot_model_items.inc"
-#include "rclcpp/rclcpp.hpp"
 
 namespace moveit
 {
@@ -50,7 +52,10 @@ namespace core
 {
 namespace
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_robot_model.joint_model_group");
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.core.joint_model_group");
+}
 
 // check if a parent or ancestor of joint is included in this group
 bool includesParent(const JointModel* joint, const JointModelGroup* group)
@@ -69,9 +74,13 @@ bool includesParent(const JointModel* joint, const JointModelGroup* group)
     {
       const JointModel* mjoint = joint->getMimic();
       if (group->hasJointModel(mjoint->getName()) && mjoint->getVariableCount() > 0 && mjoint->getMimic() == nullptr)
+      {
         found = true;
+      }
       else if (includesParent(mjoint, group))
+      {
         found = true;
+      }
       if (found)
         break;
     }
@@ -90,9 +99,13 @@ bool jointPrecedes(const JointModel* a, const JointModel* b)
     if (p == b)
       return true;
     if (p->getType() == JointModel::FIXED)
+    {
       p = p->getParentLinkModel() ? p->getParentLinkModel()->getParentJointModel() : nullptr;
+    }
     else
+    {
       break;
+    }
   }
 
   return false;
@@ -129,6 +142,7 @@ JointModelGroup::JointModelGroup(const std::string& group_name, const srdf::Mode
       if (vc > 1)
         is_single_dof_ = false;
       const std::vector<std::string>& name_order = joint_model->getVariableNames();
+
       if (joint_model->getMimic() == nullptr)
       {
         active_joint_model_vector_.push_back(joint_model);
@@ -175,17 +189,24 @@ JointModelGroup::JointModelGroup(const std::string& group_name, const srdf::Mode
   // when updating this group within a state, it is useful to know
   // if the full state of a group is contiguous within the full state of the robot
   if (variable_index_list_.empty())
+  {
     is_contiguous_index_list_ = false;
+  }
   else
+  {
     for (std::size_t i = 1; i < variable_index_list_.size(); ++i)
+    {
       if (variable_index_list_[i] != variable_index_list_[i - 1] + 1)
       {
         is_contiguous_index_list_ = false;
         break;
       }
+    }
+  }
 
   // when updating/sampling a group state only, only mimic joints that have their parent within the group get updated.
   for (const JointModel* mimic_joint : mimic_joints_)
+  {
     // if the joint we mimic is also in this group, we will need to do updates when sampling
     if (hasJointModel(mimic_joint->getMimic()->getName()))
     {
@@ -194,6 +215,7 @@ JointModelGroup::JointModelGroup(const std::string& group_name, const srdf::Mode
       GroupMimicUpdate mu(src, dest, mimic_joint->getMimicFactor(), mimic_joint->getMimicOffset());
       group_mimic_update_.push_back(mu);
     }
+  }
 
   // now we need to make another pass for group links (we include the fixed joints here)
   std::set<const LinkModel*> group_links_set;
@@ -207,6 +229,14 @@ JointModelGroup::JointModelGroup(const std::string& group_name, const srdf::Mode
   {
     link_model_map_[link_model->getName()] = link_model;
     link_model_name_vector_.push_back(link_model->getName());
+    // if this is the first link of the group with a valid parent and includes geometry (for example `base_link`) it should included
+    if (link_model_with_geometry_vector_.empty() && link_model->getParentLinkModel() &&
+        !link_model->getParentLinkModel()->getShapes().empty())
+    {
+      link_model_with_geometry_vector_.push_back(link_model->getParentLinkModel());
+      link_model_with_geometry_name_vector_.push_back(link_model->getParentLinkModel()->getName());
+    }
+    // all child links with collision geometry should also be included
     if (!link_model->getShapes().empty())
     {
       link_model_with_geometry_vector_.push_back(link_model);
@@ -254,11 +284,13 @@ JointModelGroup::JointModelGroup(const std::string& group_name, const srdf::Mode
     // due to our sorting, the joints are sorted in a DF fashion, so looking at them in reverse,
     // we should always get to the parent.
     for (std::size_t k = joint_model_vector_.size() - 1; k > 0; --k)
+    {
       if (!jointPrecedes(joint_model_vector_[k], joint_model_vector_[k - 1]))
       {
         chain = false;
         break;
       }
+    }
     if (chain)
       is_chain_ = true;
   }
@@ -296,7 +328,7 @@ const LinkModel* JointModelGroup::getLinkModel(const std::string& name) const
   LinkModelMapConst::const_iterator it = link_model_map_.find(name);
   if (it == link_model_map_.end())
   {
-    RCLCPP_ERROR(LOGGER, "Link '%s' not found in group '%s'", name.c_str(), name_.c_str());
+    RCLCPP_ERROR(getLogger(), "Link '%s' not found in group '%s'", name.c_str(), name_.c_str());
     return nullptr;
   }
   return it->second;
@@ -307,7 +339,7 @@ const JointModel* JointModelGroup::getJointModel(const std::string& name) const
   JointModelMapConst::const_iterator it = joint_model_map_.find(name);
   if (it == joint_model_map_.end())
   {
-    RCLCPP_ERROR(LOGGER, "Joint '%s' not found in group '%s'", name.c_str(), name_.c_str());
+    RCLCPP_ERROR(getLogger(), "Joint '%s' not found in group '%s'", name.c_str(), name_.c_str());
     return nullptr;
   }
   return it->second;
@@ -318,8 +350,10 @@ void JointModelGroup::getVariableRandomPositions(random_numbers::RandomNumberGen
 {
   assert(active_joint_bounds.size() == active_joint_model_vector_.size());
   for (std::size_t i = 0; i < active_joint_model_vector_.size(); ++i)
+  {
     active_joint_model_vector_[i]->getVariableRandomPositions(rng, values + active_joint_model_start_index_[i],
                                                               *active_joint_bounds[i]);
+  }
 
   updateMimicJoints(values);
 }
@@ -330,10 +364,12 @@ void JointModelGroup::getVariableRandomPositionsNearBy(random_numbers::RandomNum
 {
   assert(active_joint_bounds.size() == active_joint_model_vector_.size());
   for (std::size_t i = 0; i < active_joint_model_vector_.size(); ++i)
+  {
     active_joint_model_vector_[i]->getVariableRandomPositionsNearBy(rng, values + active_joint_model_start_index_[i],
                                                                     *active_joint_bounds[i],
                                                                     near + active_joint_model_start_index_[i],
                                                                     distance);
+  }
   updateMimicJoints(values);
 }
 
@@ -348,10 +384,12 @@ void JointModelGroup::getVariableRandomPositionsNearBy(random_numbers::RandomNum
     std::map<JointModel::JointType, double>::const_iterator iter =
         distance_map.find(active_joint_model_vector_[i]->getType());
     if (iter != distance_map.end())
+    {
       distance = iter->second;
+    }
     else
     {
-      RCLCPP_WARN(LOGGER, "Did not pass in distance for '%s'", active_joint_model_vector_[i]->getName().c_str());
+      RCLCPP_WARN(getLogger(), "Did not pass in distance for '%s'", active_joint_model_vector_[i]->getName().c_str());
     }
     active_joint_model_vector_[i]->getVariableRandomPositionsNearBy(rng, values + active_joint_model_start_index_[i],
                                                                     *active_joint_bounds[i],
@@ -367,14 +405,18 @@ void JointModelGroup::getVariableRandomPositionsNearBy(random_numbers::RandomNum
 {
   assert(active_joint_bounds.size() == active_joint_model_vector_.size());
   if (distances.size() != active_joint_model_vector_.size())
-    throw Exception("When sampling random values nearby for group '" + name_ + "', distances vector should be of size " +
-                    boost::lexical_cast<std::string>(active_joint_model_vector_.size()) + ", but it is of size " +
-                    boost::lexical_cast<std::string>(distances.size()));
+  {
+    throw Exception("When sampling random values nearby for group '" + name_ +
+                    "', distances vector should be of size " + std::to_string(active_joint_model_vector_.size()) +
+                    ", but it is of size " + std::to_string(distances.size()));
+  }
   for (std::size_t i = 0; i < active_joint_model_vector_.size(); ++i)
+  {
     active_joint_model_vector_[i]->getVariableRandomPositionsNearBy(rng, values + active_joint_model_start_index_[i],
                                                                     *active_joint_bounds[i],
                                                                     near + active_joint_model_start_index_[i],
                                                                     distances[i]);
+  }
   updateMimicJoints(values);
 }
 
@@ -383,9 +425,11 @@ bool JointModelGroup::satisfiesPositionBounds(const double* state, const JointBo
 {
   assert(active_joint_bounds.size() == active_joint_model_vector_.size());
   for (std::size_t i = 0; i < active_joint_model_vector_.size(); ++i)
+  {
     if (!active_joint_model_vector_[i]->satisfiesPositionBounds(state + active_joint_model_start_index_[i],
                                                                 *active_joint_bounds[i], margin))
       return false;
+  }
   return true;
 }
 
@@ -394,9 +438,11 @@ bool JointModelGroup::enforcePositionBounds(double* state, const JointBoundsVect
   assert(active_joint_bounds.size() == active_joint_model_vector_.size());
   bool change = false;
   for (std::size_t i = 0; i < active_joint_model_vector_.size(); ++i)
+  {
     if (active_joint_model_vector_[i]->enforcePositionBounds(state + active_joint_model_start_index_[i],
                                                              *active_joint_bounds[i]))
       change = true;
+  }
   if (change)
     updateMimicJoints(state);
   return change;
@@ -406,8 +452,10 @@ double JointModelGroup::getMaximumExtent(const JointBoundsVector& active_joint_b
 {
   double max_distance = 0.0;
   for (std::size_t j = 0; j < active_joint_model_vector_.size(); ++j)
+  {
     max_distance += active_joint_model_vector_[j]->getMaximumExtent(*active_joint_bounds[j]) *
                     active_joint_model_vector_[j]->getDistanceFactor();
+  }
   return max_distance;
 }
 
@@ -415,9 +463,11 @@ double JointModelGroup::distance(const double* state1, const double* state2) con
 {
   double d = 0.0;
   for (std::size_t i = 0; i < active_joint_model_vector_.size(); ++i)
+  {
     d += active_joint_model_vector_[i]->getDistanceFactor() *
          active_joint_model_vector_[i]->distance(state1 + active_joint_model_start_index_[i],
                                                  state2 + active_joint_model_start_index_[i]);
+  }
   return d;
 }
 
@@ -425,9 +475,11 @@ void JointModelGroup::interpolate(const double* from, const double* to, double t
 {
   // we interpolate values only for active joint models (non-mimic)
   for (std::size_t i = 0; i < active_joint_model_vector_.size(); ++i)
+  {
     active_joint_model_vector_[i]->interpolate(from + active_joint_model_start_index_[i],
                                                to + active_joint_model_start_index_[i], t,
                                                state + active_joint_model_start_index_[i]);
+  }
 
   // now we update mimic as needed
   updateMimicJoints(state);
@@ -508,7 +560,7 @@ bool JointModelGroup::getEndEffectorTips(std::vector<const LinkModel*>& tips) co
     const JointModelGroup* eef = parent_model_->getEndEffector(name);
     if (!eef)
     {
-      RCLCPP_ERROR(LOGGER, "Unable to find joint model group for eef");
+      RCLCPP_ERROR(getLogger(), "Unable to find joint model group for eef");
       return false;
     }
     const std::string& eef_parent = eef->getEndEffectorParentGroup().second;
@@ -516,7 +568,7 @@ bool JointModelGroup::getEndEffectorTips(std::vector<const LinkModel*>& tips) co
     const LinkModel* eef_link = parent_model_->getLinkModel(eef_parent);
     if (!eef_link)
     {
-      RCLCPP_ERROR(LOGGER, "Unable to find end effector link for eef");
+      RCLCPP_ERROR(getLogger(), "Unable to find end effector link for eef");
       return false;
     }
     // insert eef_link into tips, maintaining a *sorted* vector, thus enabling use of std::lower_bound
@@ -532,14 +584,16 @@ const LinkModel* JointModelGroup::getOnlyOneEndEffectorTip() const
   std::vector<const LinkModel*> tips;
   getEndEffectorTips(tips);
   if (tips.size() == 1)
+  {
     return tips.front();
+  }
   else if (tips.size() > 1)
   {
-    RCLCPP_ERROR(LOGGER, "More than one end effector tip found for joint model group, so cannot return only one");
+    RCLCPP_ERROR(getLogger(), "More than one end effector tip found for joint model group, so cannot return only one");
   }
   else
   {
-    RCLCPP_ERROR(LOGGER, "No end effector tips found in joint model group");
+    RCLCPP_ERROR(getLogger(), "No end effector tips found in joint model group");
   }
   return nullptr;
 }
@@ -549,7 +603,7 @@ int JointModelGroup::getVariableGroupIndex(const std::string& variable) const
   VariableIndexMap::const_iterator it = joint_variables_index_map_.find(variable);
   if (it == joint_variables_index_map_.end())
   {
-    RCLCPP_ERROR(LOGGER, "Variable '%s' is not part of group '%s'", variable.c_str(), name_.c_str());
+    RCLCPP_ERROR(getLogger(), "Variable '%s' is not part of group '%s'", variable.c_str(), name_.c_str());
     return -1;
   }
   return it->second;
@@ -564,26 +618,26 @@ void JointModelGroup::setDefaultIKTimeout(double ik_timeout)
     it.second.default_ik_timeout_ = ik_timeout;
 }
 
-bool JointModelGroup::computeIKIndexBijection(const std::vector<std::string>& ik_jnames,
-                                              std::vector<unsigned int>& joint_bijection) const
+bool JointModelGroup::computeJointVariableIndices(const std::vector<std::string>& joint_names,
+                                                  std::vector<size_t>& joint_bijection) const
 {
   joint_bijection.clear();
-  for (const std::string& ik_jname : ik_jnames)
+  for (const std::string& joint_name : joint_names)
   {
-    VariableIndexMap::const_iterator it = joint_variables_index_map_.find(ik_jname);
+    VariableIndexMap::const_iterator it = joint_variables_index_map_.find(joint_name);
     if (it == joint_variables_index_map_.end())
     {
       // skip reported fixed joints
-      if (hasJointModel(ik_jname) && getJointModel(ik_jname)->getType() == JointModel::FIXED)
+      if (hasJointModel(joint_name) && getJointModel(joint_name)->getType() == JointModel::FIXED)
         continue;
-      RCLCPP_ERROR(LOGGER,
-                   "IK solver computes joint values for joint '%s' "
+      RCLCPP_ERROR(getLogger(),
+                   "Looking for variables for joint '%s', "
                    "but group '%s' does not contain such a joint.",
-                   ik_jname.c_str(), getName().c_str());
+                   joint_name.c_str(), getName().c_str());
       return false;
     }
-    const JointModel* jm = getJointModel(ik_jname);
-    for (unsigned int k = 0; k < jm->getVariableCount(); ++k)
+    const JointModel* jm = getJointModel(joint_name);
+    for (size_t k = 0; k < jm->getVariableCount(); ++k)
       joint_bijection.push_back(it->second + k);
   }
   return true;
@@ -598,26 +652,30 @@ void JointModelGroup::setSolverAllocators(const std::pair<SolverAllocatorFn, Sol
     if (group_kinematics_.first.solver_instance_)
     {
       group_kinematics_.first.solver_instance_->setDefaultTimeout(group_kinematics_.first.default_ik_timeout_);
-      if (!computeIKIndexBijection(group_kinematics_.first.solver_instance_->getJointNames(),
-                                   group_kinematics_.first.bijection_))
+      if (!computeJointVariableIndices(group_kinematics_.first.solver_instance_->getJointNames(),
+                                       group_kinematics_.first.bijection_))
         group_kinematics_.first.reset();
     }
   }
   else
+  {
     // we now compute a joint bijection only if we have a solver map
     for (const std::pair<const JointModelGroup* const, SolverAllocatorFn>& it : solvers.second)
+    {
       if (it.first->getSolverInstance())
       {
         KinematicsSolver& ks = group_kinematics_.second[it.first];
         ks.allocator_ = it.second;
         ks.solver_instance_ = const_cast<JointModelGroup*>(it.first)->getSolverInstance();
         ks.default_ik_timeout_ = group_kinematics_.first.default_ik_timeout_;
-        if (!computeIKIndexBijection(ks.solver_instance_->getJointNames(), ks.bijection_))
+        if (!computeJointVariableIndices(ks.solver_instance_->getJointNames(), ks.bijection_))
         {
           group_kinematics_.second.clear();
           break;
         }
       }
+    }
+  }
 }
 
 bool JointModelGroup::canSetStateFromIK(const std::string& tip) const
@@ -630,7 +688,7 @@ bool JointModelGroup::canSetStateFromIK(const std::string& tip) const
 
   if (tip_frames.empty())
   {
-    RCLCPP_WARN(LOGGER, "Group %s has no tip frame(s)", name_.c_str());
+    RCLCPP_WARN(getLogger(), "Group %s has no tip frame(s)", name_.c_str());
     return false;
   }
 
@@ -640,7 +698,8 @@ bool JointModelGroup::canSetStateFromIK(const std::string& tip) const
     // remove frame reference, if specified
     const std::string& tip_local = tip[0] == '/' ? tip.substr(1) : tip;
     const std::string& tip_frame_local = tip_frame[0] == '/' ? tip_frame.substr(1) : tip_frame;
-    RCLCPP_WARN(LOGGER, "comparing input tip: %s to this groups tip: %s ", tip_local.c_str(), tip_frame_local.c_str());
+    RCLCPP_DEBUG(getLogger(), "comparing input tip: %s to this groups tip: %s ", tip_local.c_str(),
+                 tip_frame_local.c_str());
 
     // Check if the IK solver's tip is the same as the frame of inquiry
     if (tip_local != tip_frame_local)
@@ -668,11 +727,11 @@ bool JointModelGroup::canSetStateFromIK(const std::string& tip) const
 
 void JointModelGroup::printGroupInfo(std::ostream& out) const
 {
-  out << "Group '" << name_ << "' using " << variable_count_ << " variables" << std::endl;
-  out << "  * Joints:" << std::endl;
+  out << "Group '" << name_ << "' using " << variable_count_ << " variables\n";
+  out << "  * Joints:\n";
   for (const JointModel* joint_model : joint_model_vector_)
-    out << "    '" << joint_model->getName() << "' (" << joint_model->getTypeName() << ")" << std::endl;
-  out << "  * Variables:" << std::endl;
+    out << "    '" << joint_model->getName() << "' (" << joint_model->getTypeName() << ")\n";
+  out << "  * Variables:\n";
   for (const std::string& variable_name : variable_names_)
   {
     int local_idx = joint_variables_index_map_.find(variable_name)->second;
@@ -681,47 +740,52 @@ void JointModelGroup::printGroupInfo(std::ostream& out) const
         << (jm->getFirstVariableIndex() + jm->getLocalVariableIndex(variable_name)) << " in full state, index "
         << local_idx << " in group state";
     if (jm->getMimic())
-      out << ", mimic '" << jm->getMimic()->getName() << "'";
-    out << std::endl;
-    out << "        " << parent_model_->getVariableBounds(variable_name) << std::endl;
+      out << ", mimic '" << jm->getMimic()->getName() << '\'';
+    out << '\n';
+    out << "        " << parent_model_->getVariableBounds(variable_name) << '\n';
   }
-  out << "  * Variables Index List:" << std::endl;
-  out << "    ";
+  out << "  * Variables Index List:\n    ";
   for (int variable_index : variable_index_list_)
-    out << variable_index << " ";
+    out << variable_index << ' ';
   if (is_contiguous_index_list_)
+  {
     out << "(contiguous)";
+  }
   else
+  {
     out << "(non-contiguous)";
-  out << std::endl;
+  }
+  out << '\n';
   if (group_kinematics_.first)
   {
-    out << "  * Kinematics solver bijection:" << std::endl;
+    out << "  * Kinematics solver bijection:\n";
     out << "    ";
     for (unsigned int index : group_kinematics_.first.bijection_)
-      out << index << " ";
-    out << std::endl;
+      out << index << ' ';
+    out << '\n';
   }
   if (!group_kinematics_.second.empty())
   {
-    out << "  * Compound kinematics solver:" << std::endl;
+    out << "  * Compound kinematics solver:\n";
     for (const std::pair<const JointModelGroup* const, KinematicsSolver>& it : group_kinematics_.second)
     {
-      out << "    " << it.first->getName() << ":";
+      out << "    " << it.first->getName() << ':';
       for (unsigned int index : it.second.bijection_)
-        out << " " << index;
-      out << std::endl;
+        out << ' ' << index;
+      out << '\n';
     }
   }
 
   if (!group_mimic_update_.empty())
   {
-    out << "  * Local Mimic Updates:" << std::endl;
+    out << "  * Local Mimic Updates:\n";
     for (const GroupMimicUpdate& mimic_update : group_mimic_update_)
+    {
       out << "    [" << mimic_update.dest << "] = " << mimic_update.factor << " * [" << mimic_update.src << "] + "
-          << mimic_update.offset << std::endl;
+          << mimic_update.offset << '\n';
+    }
   }
-  out << std::endl;
+  out << '\n';
 }
 
 bool JointModelGroup::isValidVelocityMove(const std::vector<double>& from_joint_pose,
@@ -730,7 +794,7 @@ bool JointModelGroup::isValidVelocityMove(const std::vector<double>& from_joint_
   // Check for equal sized arrays
   if (from_joint_pose.size() != to_joint_pose.size())
   {
-    RCLCPP_ERROR(LOGGER, "To and from joint poses are of different sizes.");
+    RCLCPP_ERROR(getLogger(), "To and from joint poses are of different sizes.");
     return false;
   }
 
@@ -741,7 +805,7 @@ bool JointModelGroup::isValidVelocityMove(const double* from_joint_pose, const d
                                           std::size_t array_size, double dt) const
 {
   const std::vector<const JointModel::Bounds*>& bounds = getActiveJointModelsBounds();
-  const std::vector<unsigned int>& bij = getKinematicsSolverJointBijection();
+  const std::vector<size_t>& bij = getKinematicsSolverJointBijection();
 
   for (std::size_t i = 0; i < array_size; ++i)
   {
@@ -751,8 +815,8 @@ bool JointModelGroup::isValidVelocityMove(const double* from_joint_pose, const d
     if (var_bounds->size() != 1)
     {
       // TODO(davetcoleman) Support multiple variables
-      RCLCPP_ERROR(LOGGER, "Attempting to check velocity bounds for waypoint move with joints that have multiple "
-                           "variables");
+      RCLCPP_ERROR(getLogger(), "Attempting to check velocity bounds for waypoint move with joints that have multiple "
+                                "variables");
       return false;
     }
     const double max_velocity = (*var_bounds)[0].max_velocity_;
@@ -760,12 +824,65 @@ bool JointModelGroup::isValidVelocityMove(const double* from_joint_pose, const d
     double max_dtheta = dt * max_velocity;
     if (dtheta > max_dtheta)
     {
-      RCLCPP_DEBUG(LOGGER, "Not valid velocity move because of joint %lu", i);
+      RCLCPP_DEBUG(getLogger(), "Not valid velocity move because of joint %lu", i);
       return false;
     }
   }
 
   return true;
+}
+
+std::pair<Eigen::VectorXd, Eigen::VectorXd> JointModelGroup::getLowerAndUpperLimits() const
+{
+  // Get the group joints lower/upper position limits.
+  Eigen::VectorXd lower_limits(active_variable_count_);
+  Eigen::VectorXd upper_limits(active_variable_count_);
+  int variable_index = 0;
+  for (const moveit::core::JointModel::Bounds* joint_bounds : active_joint_models_bounds_)
+  {
+    for (const moveit::core::VariableBounds& variable_bounds : *joint_bounds)
+    {
+      lower_limits[variable_index] =
+          variable_bounds.position_bounded_ ? variable_bounds.min_position_ : -std::numeric_limits<double>::infinity();
+      upper_limits[variable_index] =
+          variable_bounds.position_bounded_ ? variable_bounds.max_position_ : std::numeric_limits<double>::infinity();
+      variable_index++;
+    }
+  }
+  return { lower_limits, upper_limits };
+}
+
+std::pair<Eigen::VectorXd, Eigen::VectorXd> JointModelGroup::getMaxVelocitiesAndAccelerationBounds() const
+{
+  Eigen::VectorXd max_joint_velocities = Eigen::VectorXd::Constant(active_variable_count_, 0.0);
+  Eigen::VectorXd max_joint_accelerations = Eigen::VectorXd::Constant(active_variable_count_, 0.0);
+  // Check if variable count matches number of joint model bounds
+  if (active_joint_models_bounds_.size() != active_variable_count_)
+  {
+    // TODO(sjahr) Support multiple variables
+    RCLCPP_ERROR(getLogger(), "Number of active joint models does not match number of active joint model bounds. "
+                              "Returning bound vectors with zeros");
+    return { max_joint_velocities, max_joint_accelerations };
+  }
+  // Check if the joint group contains multi-dof joints
+  for (const auto& bound : active_joint_models_bounds_)
+  {
+    if (bound->size() != 1)
+    {
+      RCLCPP_ERROR(getLogger(), "Multi-dof joints are currently not supported by "
+                                "getMaxVelocitiesAndAccelerationBounds(). Returning bound vectors with zeros.");
+      return { max_joint_velocities, max_joint_accelerations };
+    }
+  }
+  // Populate max_joint_velocity and acceleration vectors
+  for (std::size_t i = 0; i < active_joint_models_bounds_.size(); ++i)
+  {
+    max_joint_velocities[i] = std::min(-active_joint_models_bounds_[i]->at(0).min_velocity_,
+                                       active_joint_models_bounds_[i]->at(0).max_velocity_);
+    max_joint_accelerations[i] = std::min(-active_joint_models_bounds_[i]->at(0).min_acceleration_,
+                                          active_joint_models_bounds_[i]->at(0).max_acceleration_);
+  }
+  return { max_joint_velocities, max_joint_accelerations };
 }
 }  // end of namespace core
 }  // end of namespace moveit

@@ -34,12 +34,14 @@
 
 /* Author: Ioan Sucan, Jens Petit */
 
-#include <moveit/collision_detection_fcl/collision_env_fcl.h>
-#include <moveit/collision_detection_fcl/collision_detector_allocator_fcl.h>
-#include <moveit/collision_detection_fcl/collision_common.h>
+#include <moveit/collision_detection_fcl/collision_env_fcl.hpp>
+#include <moveit/collision_detection_fcl/collision_detector_allocator_fcl.hpp>
+#include <moveit/collision_detection_fcl/collision_common.hpp>
 
-#include <moveit/collision_detection_fcl/fcl_compat.h>
-#include <boost/bind.hpp>
+#include <moveit/collision_detection_fcl/fcl_compat.hpp>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <moveit/utils/logger.hpp>
 
 #if (MOVEIT_FCL_VERSION >= FCL_VERSION_CHECK(0, 6, 0))
 #include <fcl/broadphase/broadphase_dynamic_AABB_tree.h>
@@ -47,8 +49,37 @@
 
 namespace collision_detection
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_collision_detection_fcl.collision_env_fcl");
 const std::string CollisionDetectorAllocatorFCL::NAME("FCL");
+
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.core.collision_detection_fcl");
+}
+
+// Check whether this FCL version supports the requested computations
+void checkFCLCapabilities(const DistanceRequest& req)
+{
+#if MOVEIT_FCL_VERSION < FCL_VERSION_CHECK(0, 6, 0)
+  if (req.enable_nearest_points)
+  {
+    // Known issues:
+    //   https://github.com/flexible-collision-library/fcl/issues/171,
+    //   https://github.com/flexible-collision-library/fcl/pull/288
+    rclcpp::Clock steady_clock(RCL_STEADY_TIME);
+    RCLCPP_ERROR_THROTTLE(getLogger(), steady_clock, 2000,
+                          "You requested a distance check with enable_nearest_points=true, "
+                          "but the FCL version MoveIt was compiled against (%d.%d.%d) "
+                          "is known to return bogus nearest points. Please update your FCL "
+                          "to at least 0.6.0.",
+                          FCL_MAJOR_VERSION, FCL_MINOR_VERSION, FCL_PATCH_VERSION);
+  }
+#else
+  static_cast<void>(req);  // silent -Wunused-parameter
+#endif
+}
+}  // namespace
 
 CollisionEnvFCL::CollisionEnvFCL(const moveit::core::RobotModelConstPtr& model, double padding, double scale)
   : CollisionEnv(model, padding, scale)
@@ -59,7 +90,8 @@ CollisionEnvFCL::CollisionEnvFCL(const moveit::core::RobotModelConstPtr& model, 
   robot_fcl_objs_.resize(robot_model_->getLinkGeometryCount());
   // we keep the same order of objects as what RobotState *::getLinkState() returns
   for (auto link : links)
-    for (std::size_t j = 0; j < link->getShapes().size(); ++j)
+  {
+    for (std::size_t j{ 0 }; j < link->getShapes().size(); ++j)
     {
       FCLGeometryConstPtr link_geometry = createCollisionGeometry(link->getShapes()[j], getLinkScale(link->getName()),
                                                                   getLinkPadding(link->getName()), link, j);
@@ -72,19 +104,19 @@ CollisionEnvFCL::CollisionEnvFCL(const moveit::core::RobotModelConstPtr& model, 
         // Every time this object is created, g->computeLocalAABB() is called  which is
         // very expensive and should only be calculated once. To update the AABB, use the
         // collObj->setTransform and then call collObj->computeAABB() to transform the AABB.
-        robot_fcl_objs_[index] =
-            FCLCollisionObjectConstPtr(new fcl::CollisionObjectd(link_geometry->collision_geometry_));
+        robot_fcl_objs_[index] = FCLCollisionObjectConstPtr(
+            std::make_shared<const fcl::CollisionObjectd>(link_geometry->collision_geometry_));
       }
       else
-        RCLCPP_ERROR(LOGGER, "Unable to construct collision geometry for link '%s'", link->getName().c_str());
+        RCLCPP_ERROR(getLogger(), "Unable to construct collision geometry for link '%s'", link->getName().c_str());
     }
+  }
 
-  auto m = new fcl::DynamicAABBTreeCollisionManagerd();
-  // m->tree_init_level = 2;
-  manager_.reset(m);
+  manager_ = std::make_unique<fcl::DynamicAABBTreeCollisionManagerd>();
 
   // request notifications about changes to new world
-  observer_handle_ = getWorld()->addObserver(boost::bind(&CollisionEnvFCL::notifyObjectChange, this, _1, _2));
+  observer_handle_ = getWorld()->addObserver(
+      [this](const World::ObjectConstPtr& object, World::Action action) { notifyObjectChange(object, action); });
 }
 
 CollisionEnvFCL::CollisionEnvFCL(const moveit::core::RobotModelConstPtr& model, const WorldPtr& world, double padding,
@@ -97,7 +129,8 @@ CollisionEnvFCL::CollisionEnvFCL(const moveit::core::RobotModelConstPtr& model, 
   robot_fcl_objs_.resize(robot_model_->getLinkGeometryCount());
   // we keep the same order of objects as what RobotState *::getLinkState() returns
   for (auto link : links)
-    for (std::size_t j = 0; j < link->getShapes().size(); ++j)
+  {
+    for (std::size_t j{ 0 }; j < link->getShapes().size(); ++j)
     {
       FCLGeometryConstPtr g = createCollisionGeometry(link->getShapes()[j], getLinkScale(link->getName()),
                                                       getLinkPadding(link->getName()), link, j);
@@ -110,18 +143,18 @@ CollisionEnvFCL::CollisionEnvFCL(const moveit::core::RobotModelConstPtr& model, 
         // Every time this object is created, g->computeLocalAABB() is called  which is
         // very expensive and should only be calculated once. To update the AABB, use the
         // collObj->setTransform and then call collObj->computeAABB() to transform the AABB.
-        robot_fcl_objs_[index] = FCLCollisionObjectConstPtr(new fcl::CollisionObjectd(g->collision_geometry_));
+        robot_fcl_objs_[index] = std::make_shared<const fcl::CollisionObjectd>(g->collision_geometry_);
       }
       else
-        RCLCPP_ERROR(LOGGER, "Unable to construct collision geometry for link '%s'", link->getName().c_str());
+        RCLCPP_ERROR(getLogger(), "Unable to construct collision geometry for link '%s'", link->getName().c_str());
     }
+  }
 
-  auto m = new fcl::DynamicAABBTreeCollisionManagerd();
-  // m->tree_init_level = 2;
-  manager_.reset(m);
+  manager_ = std::make_unique<fcl::DynamicAABBTreeCollisionManagerd>();
 
   // request notifications about changes to new world
-  observer_handle_ = getWorld()->addObserver(boost::bind(&CollisionEnvFCL::notifyObjectChange, this, _1, _2));
+  observer_handle_ = getWorld()->addObserver(
+      [this](const World::ObjectConstPtr& object, World::Action action) { notifyObjectChange(object, action); });
   getWorld()->notifyObserverAllObjects(observer_handle_, World::CREATE);
 }
 
@@ -135,9 +168,7 @@ CollisionEnvFCL::CollisionEnvFCL(const CollisionEnvFCL& other, const WorldPtr& w
   robot_geoms_ = other.robot_geoms_;
   robot_fcl_objs_ = other.robot_fcl_objs_;
 
-  auto m = new fcl::DynamicAABBTreeCollisionManagerd();
-  // m->tree_init_level = 2;
-  manager_.reset(m);
+  manager_ = std::make_unique<fcl::DynamicAABBTreeCollisionManagerd>();
 
   fcl_objs_ = other.fcl_objs_;
   for (auto& fcl_obj : fcl_objs_)
@@ -145,16 +176,20 @@ CollisionEnvFCL::CollisionEnvFCL(const CollisionEnvFCL& other, const WorldPtr& w
   // manager_->update();
 
   // request notifications about changes to new world
-  observer_handle_ = getWorld()->addObserver(boost::bind(&CollisionEnvFCL::notifyObjectChange, this, _1, _2));
+  observer_handle_ = getWorld()->addObserver(
+      [this](const World::ObjectConstPtr& object, World::Action action) { notifyObjectChange(object, action); });
 }
 
 void CollisionEnvFCL::getAttachedBodyObjects(const moveit::core::AttachedBody* ab,
                                              std::vector<FCLGeometryConstPtr>& geoms) const
 {
   const std::vector<shapes::ShapeConstPtr>& shapes = ab->getShapes();
-  for (std::size_t i = 0; i < shapes.size(); ++i)
+  const size_t num_shapes{ shapes.size() };
+  geoms.reserve(num_shapes);
+  for (std::size_t i = 0; i < num_shapes; ++i)
   {
-    FCLGeometryConstPtr co = createCollisionGeometry(shapes[i], ab, i);
+    FCLGeometryConstPtr co = createCollisionGeometry(shapes[i], getLinkScale(ab->getAttachedLinkName()),
+                                                     getLinkPadding(ab->getAttachedLinkName()), ab, i);
     if (co)
       geoms.push_back(co);
   }
@@ -162,12 +197,12 @@ void CollisionEnvFCL::getAttachedBodyObjects(const moveit::core::AttachedBody* a
 
 void CollisionEnvFCL::constructFCLObjectWorld(const World::Object* obj, FCLObject& fcl_obj) const
 {
-  for (std::size_t i = 0; i < obj->shapes_.size(); ++i)
+  for (std::size_t i{ 0 }; i < obj->shapes_.size(); ++i)
   {
     FCLGeometryConstPtr g = createCollisionGeometry(obj->shapes_[i], obj);
     if (g)
     {
-      auto co = new fcl::CollisionObjectd(g->collision_geometry_, transform2fcl(obj->shape_poses_[i]));
+      auto co = new fcl::CollisionObjectd(g->collision_geometry_, transform2fcl(obj->global_shape_poses_[i]));
       fcl_obj.collision_objects_.push_back(FCLCollisionObjectPtr(co));
       fcl_obj.collision_geometry_.push_back(g);
     }
@@ -179,7 +214,8 @@ void CollisionEnvFCL::constructFCLObjectRobot(const moveit::core::RobotState& st
   fcl_obj.collision_objects_.reserve(robot_geoms_.size());
   fcl::Transform3d fcl_tf;
 
-  for (std::size_t i = 0; i < robot_geoms_.size(); ++i)
+  for (std::size_t i{ 0 }; i < robot_geoms_.size(); ++i)
+  {
     if (robot_geoms_[i] && robot_geoms_[i]->collision_geometry_)
     {
       transform2fcl(state.getCollisionBodyTransform(robot_geoms_[i]->collision_geometry_data_->ptr.link,
@@ -190,6 +226,7 @@ void CollisionEnvFCL::constructFCLObjectRobot(const moveit::core::RobotState& st
       coll_obj->computeAABB();
       fcl_obj.collision_objects_.push_back(FCLCollisionObjectPtr(coll_obj));
     }
+  }
 
   // TODO: Implement a method for caching fcl::CollisionObject's for moveit::core::AttachedBody's
   std::vector<const moveit::core::AttachedBody*> ab;
@@ -200,26 +237,26 @@ void CollisionEnvFCL::constructFCLObjectRobot(const moveit::core::RobotState& st
     getAttachedBodyObjects(body, objs);
     const EigenSTL::vector_Isometry3d& ab_t = body->getGlobalCollisionBodyTransforms();
     for (std::size_t k = 0; k < objs.size(); ++k)
+    {
       if (objs[k]->collision_geometry_)
       {
         transform2fcl(ab_t[k], fcl_tf);
         fcl_obj.collision_objects_.push_back(
-            FCLCollisionObjectPtr(new fcl::CollisionObjectd(objs[k]->collision_geometry_, fcl_tf)));
+            std::make_shared<fcl::CollisionObjectd>(objs[k]->collision_geometry_, fcl_tf));
         // we copy the shared ptr to the CollisionGeometryData, as this is not stored by the class itself,
         // and would be destroyed when objs goes out of scope.
         fcl_obj.collision_geometry_.push_back(objs[k]);
       }
+    }
   }
 }
 
 void CollisionEnvFCL::allocSelfCollisionBroadPhase(const moveit::core::RobotState& state, FCLManager& manager) const
 {
-  auto m = new fcl::DynamicAABBTreeCollisionManagerd();
-  // m->tree_init_level = 2;
-  manager.manager_.reset(m);
+  manager.manager_ = std::make_unique<fcl::DynamicAABBTreeCollisionManagerd>();
+
   constructFCLObjectRobot(state, manager.object_);
   manager.object_.registerTo(manager.manager_.get());
-  // manager.manager_->update();
 }
 
 void CollisionEnvFCL::checkSelfCollision(const CollisionRequest& req, CollisionResult& res,
@@ -253,6 +290,10 @@ void CollisionEnvFCL::checkSelfCollisionHelper(const CollisionRequest& req, Coll
     dreq.enableGroup(getRobotModel());
     distanceSelf(dreq, dres, state);
     res.distance = dres.minimum_distance.distance;
+    if (req.detailed_distance)
+    {
+      res.distance_result = dres;
+    }
   }
 }
 
@@ -269,19 +310,19 @@ void CollisionEnvFCL::checkRobotCollision(const CollisionRequest& req, Collision
   checkRobotCollisionHelper(req, res, state, &acm);
 }
 
-void CollisionEnvFCL::checkRobotCollision(const CollisionRequest& req, CollisionResult& res,
-                                          const moveit::core::RobotState& state1,
-                                          const moveit::core::RobotState& state2) const
+void CollisionEnvFCL::checkRobotCollision(const CollisionRequest& /*req*/, CollisionResult& /*res*/,
+                                          const moveit::core::RobotState& /*state1*/,
+                                          const moveit::core::RobotState& /*state2*/) const
 {
-  RCLCPP_ERROR(LOGGER, "Continuous collision not implemented");
+  RCLCPP_ERROR(getLogger(), "Continuous collision not implemented");
 }
 
-void CollisionEnvFCL::checkRobotCollision(const CollisionRequest& req, CollisionResult& res,
-                                          const moveit::core::RobotState& state1,
-                                          const moveit::core::RobotState& state2,
-                                          const AllowedCollisionMatrix& acm) const
+void CollisionEnvFCL::checkRobotCollision(const CollisionRequest& /*req*/, CollisionResult& /*res*/,
+                                          const moveit::core::RobotState& /*state1*/,
+                                          const moveit::core::RobotState& /*state2*/,
+                                          const AllowedCollisionMatrix& /*acm*/) const
 {
-  RCLCPP_ERROR(LOGGER, "Not implemented");
+  RCLCPP_ERROR(getLogger(), "Not implemented");
 }
 
 void CollisionEnvFCL::checkRobotCollisionHelper(const CollisionRequest& req, CollisionResult& res,
@@ -306,12 +347,18 @@ void CollisionEnvFCL::checkRobotCollisionHelper(const CollisionRequest& req, Col
     dreq.enableGroup(getRobotModel());
     distanceRobot(dreq, dres, state);
     res.distance = dres.minimum_distance.distance;
+    if (req.detailed_distance)
+    {
+      res.distance_result = dres;
+    }
   }
 }
 
 void CollisionEnvFCL::distanceSelf(const DistanceRequest& req, DistanceResult& res,
                                    const moveit::core::RobotState& state) const
 {
+  checkFCLCapabilities(req);
+
   FCLManager manager;
   allocSelfCollisionBroadPhase(state, manager);
   DistanceData drd(&req, &res);
@@ -322,6 +369,8 @@ void CollisionEnvFCL::distanceSelf(const DistanceRequest& req, DistanceResult& r
 void CollisionEnvFCL::distanceRobot(const DistanceRequest& req, DistanceResult& res,
                                     const moveit::core::RobotState& state) const
 {
+  checkFCLCapabilities(req);
+
   FCLObject fcl_obj;
   constructFCLObjectRobot(state, fcl_obj);
 
@@ -381,7 +430,8 @@ void CollisionEnvFCL::setWorld(const WorldPtr& world)
   CollisionEnv::setWorld(world);
 
   // request notifications about changes to new world
-  observer_handle_ = getWorld()->addObserver(boost::bind(&CollisionEnvFCL::notifyObjectChange, this, _1, _2));
+  observer_handle_ = getWorld()->addObserver(
+      [this](const World::ObjectConstPtr& object, World::Action action) { notifyObjectChange(object, action); });
 
   // get notifications any objects already in the new world
   getWorld()->notifyObserverAllObjects(observer_handle_, World::CREATE);
@@ -400,6 +450,38 @@ void CollisionEnvFCL::notifyObjectChange(const ObjectConstPtr& obj, World::Actio
     }
     cleanCollisionGeometryCache();
   }
+  else if (action == World::MOVE_SHAPE)
+  {
+    auto it = fcl_objs_.find(obj->id_);
+    if (it == fcl_objs_.end())
+    {
+      RCLCPP_ERROR(getLogger(), "Cannot move shapes of unknown FCL object: '%s'", obj->id_.c_str());
+      return;
+    }
+
+    if (obj->global_shape_poses_.size() != it->second.collision_objects_.size())
+    {
+      RCLCPP_ERROR(getLogger(),
+                   "Cannot move shapes, shape size mismatch between FCL object and world object: '%s'. Respectively "
+                   "%zu and %zu.",
+                   obj->id_.c_str(), it->second.collision_objects_.size(), it->second.collision_objects_.size());
+      return;
+    }
+
+    for (std::size_t i = 0; i < it->second.collision_objects_.size(); ++i)
+    {
+      it->second.collision_objects_[i]->setTransform(transform2fcl(obj->global_shape_poses_[i]));
+
+      // compute AABB, order matters
+      it->second.collision_geometry_[i]->collision_geometry_->computeLocalAABB();
+      it->second.collision_objects_[i]->computeAABB();
+    }
+
+    // update AABB in the FCL broadphase manager tree
+    // see https://github.com/moveit/moveit/pull/3601 for benchmarks
+    it->second.unregisterFrom(manager_.get());
+    it->second.registerTo(manager_.get());
+  }
   else
   {
     updateFCLObject(obj->id_);
@@ -416,7 +498,7 @@ void CollisionEnvFCL::updatedPaddingOrScaling(const std::vector<std::string>& li
     const moveit::core::LinkModel* lmodel = robot_model_->getLinkModel(link);
     if (lmodel)
     {
-      for (std::size_t j = 0; j < lmodel->getShapes().size(); ++j)
+      for (std::size_t j{ 0 }; j < lmodel->getShapes().size(); ++j)
       {
         FCLGeometryConstPtr g = createCollisionGeometry(lmodel->getShapes()[j], getLinkScale(lmodel->getName()),
                                                         getLinkPadding(lmodel->getName()), lmodel, j);
@@ -424,12 +506,12 @@ void CollisionEnvFCL::updatedPaddingOrScaling(const std::vector<std::string>& li
         {
           index = lmodel->getFirstCollisionBodyTransformIndex() + j;
           robot_geoms_[index] = g;
-          robot_fcl_objs_[index] = FCLCollisionObjectConstPtr(new fcl::CollisionObjectd(g->collision_geometry_));
+          robot_fcl_objs_[index] = std::make_shared<const fcl::CollisionObjectd>(g->collision_geometry_);
         }
       }
     }
     else
-      RCLCPP_ERROR(LOGGER, "Updating padding or scaling for unknown link: '%s'", link.c_str());
+      RCLCPP_ERROR(getLogger(), "Updating padding or scaling for unknown link: '%s'", link.c_str());
   }
 }
 

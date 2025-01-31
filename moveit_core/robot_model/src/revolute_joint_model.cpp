@@ -35,9 +35,8 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/robot_model/revolute_joint_model.h>
+#include <moveit/robot_model/revolute_joint_model.hpp>
 #include <geometric_shapes/check_isometry.h>
-#include <boost/math/constants/constants.hpp>
 #include <algorithm>
 #include <cmath>
 
@@ -45,16 +44,24 @@ namespace moveit
 {
 namespace core
 {
-RevoluteJointModel::RevoluteJointModel(const std::string& name)
-  : JointModel(name), axis_(0.0, 0.0, 0.0), continuous_(false), x2_(0.0), y2_(0.0), z2_(0.0), xy_(0.0), xz_(0.0), yz_(0.0)
+RevoluteJointModel::RevoluteJointModel(const std::string& name, size_t joint_index, size_t first_variable_index)
+  : JointModel(name, joint_index, first_variable_index)
+  , axis_(0.0, 0.0, 0.0)
+  , continuous_(false)
+  , x2_(0.0)
+  , y2_(0.0)
+  , z2_(0.0)
+  , xy_(0.0)
+  , xz_(0.0)
+  , yz_(0.0)
 {
   type_ = REVOLUTE;
-  variable_names_.push_back(name_);
+  variable_names_.push_back(getName());
   variable_bounds_.resize(1);
   variable_bounds_[0].position_bounded_ = true;
-  variable_bounds_[0].min_position_ = -boost::math::constants::pi<double>();
-  variable_bounds_[0].max_position_ = boost::math::constants::pi<double>();
-  variable_index_map_[name_] = 0;
+  variable_bounds_[0].min_position_ = -M_PI;
+  variable_bounds_[0].max_position_ = M_PI;
+  variable_index_map_[getName()] = 0;
   computeVariableBoundsMsg();
 }
 
@@ -80,15 +87,15 @@ void RevoluteJointModel::setContinuous(bool flag)
   if (flag)
   {
     variable_bounds_[0].position_bounded_ = false;
-    variable_bounds_[0].min_position_ = -boost::math::constants::pi<double>();
-    variable_bounds_[0].max_position_ = boost::math::constants::pi<double>();
+    variable_bounds_[0].min_position_ = -M_PI;
+    variable_bounds_[0].max_position_ = M_PI;
   }
   else
     variable_bounds_[0].position_bounded_ = true;
   computeVariableBoundsMsg();
 }
 
-double RevoluteJointModel::getMaximumExtent(const Bounds& other_bounds) const
+double RevoluteJointModel::getMaximumExtent(const Bounds& /*other_bounds*/) const
 {
   return variable_bounds_[0].max_position_ - variable_bounds_[0].min_position_;
 }
@@ -97,9 +104,13 @@ void RevoluteJointModel::getVariableDefaultPositions(double* values, const Bound
 {
   // if zero is a valid value
   if (bounds[0].min_position_ <= 0.0 && bounds[0].max_position_ >= 0.0)
+  {
     values[0] = 0.0;
+  }
   else
+  {
     values[0] = (bounds[0].min_position_ + bounds[0].max_position_) / 2.0;
+  }
 }
 
 void RevoluteJointModel::getVariableRandomPositions(random_numbers::RandomNumberGenerator& rng, double* values,
@@ -118,8 +129,10 @@ void RevoluteJointModel::getVariableRandomPositionsNearBy(random_numbers::Random
     enforcePositionBounds(values, bounds);
   }
   else
+  {
     values[0] = rng.uniformReal(std::max(bounds[0].min_position_, near[0] - distance),
                                 std::min(bounds[0].max_position_, near[0] + distance));
+  }
 }
 
 void RevoluteJointModel::interpolate(const double* from, const double* to, const double t, double* state) const
@@ -127,20 +140,30 @@ void RevoluteJointModel::interpolate(const double* from, const double* to, const
   if (continuous_)
   {
     double diff = to[0] - from[0];
-    if (fabs(diff) <= boost::math::constants::pi<double>())
+    if (fabs(diff) <= M_PI)
+    {
       state[0] = from[0] + diff * t;
+    }
     else
     {
       if (diff > 0.0)
-        diff = 2.0 * boost::math::constants::pi<double>() - diff;
+      {
+        diff = 2.0 * M_PI - diff;
+      }
       else
-        diff = -2.0 * boost::math::constants::pi<double>() - diff;
+      {
+        diff = -2.0 * M_PI - diff;
+      }
       state[0] = from[0] - diff * t;
       // input states are within bounds, so the following check is sufficient
-      if (state[0] > boost::math::constants::pi<double>())
-        state[0] -= 2.0 * boost::math::constants::pi<double>();
-      else if (state[0] < -boost::math::constants::pi<double>())
-        state[0] += 2.0 * boost::math::constants::pi<double>();
+      if (state[0] > M_PI)
+      {
+        state[0] -= 2.0 * M_PI;
+      }
+      else if (state[0] < -M_PI)
+      {
+        state[0] += 2.0 * M_PI;
+      }
     }
   }
   else
@@ -151,8 +174,8 @@ double RevoluteJointModel::distance(const double* values1, const double* values2
 {
   if (continuous_)
   {
-    double d = fmod(fabs(values1[0] - values2[0]), 2.0 * boost::math::constants::pi<double>());
-    return (d > boost::math::constants::pi<double>()) ? 2.0 * boost::math::constants::pi<double>() - d : d;
+    double d = fmod(fabs(values1[0] - values2[0]), 2.0 * M_PI);
+    return (d > M_PI) ? 2.0 * M_PI - d : d;
   }
   else
     return fabs(values1[0] - values2[0]);
@@ -161,9 +184,13 @@ double RevoluteJointModel::distance(const double* values1, const double* values2
 bool RevoluteJointModel::satisfiesPositionBounds(const double* values, const Bounds& bounds, double margin) const
 {
   if (continuous_)
+  {
     return true;
+  }
   else
-    return !(values[0] < bounds[0].min_position_ - margin || values[0] > bounds[0].max_position_ + margin);
+  {
+    return values[0] >= bounds[0].min_position_ - margin && values[0] <= bounds[0].max_position_ + margin;
+  }
 }
 
 bool RevoluteJointModel::harmonizePosition(double* values, const JointModel::Bounds& other_bounds) const
@@ -193,14 +220,17 @@ bool RevoluteJointModel::enforcePositionBounds(double* values, const Bounds& bou
   if (continuous_)
   {
     double& v = values[0];
-    if (v <= -boost::math::constants::pi<double>() || v > boost::math::constants::pi<double>())
+    if (v <= -M_PI || v > M_PI)
     {
-      v = fmod(v, 2.0 * boost::math::constants::pi<double>());
-      if (v <= -boost::math::constants::pi<double>())
-        v += 2.0 * boost::math::constants::pi<double>();
-      else if (v > boost::math::constants::pi<double>())
-        v -= 2.0 * boost::math::constants::pi<double>();
-      return true;
+      v = fmod(v, 2.0 * M_PI);
+      if (v <= -M_PI)
+      {
+        v += 2.0 * M_PI;
+      }
+      else if (v > M_PI)
+      {
+        v -= 2.0 * M_PI;
+      }
     }
   }
   else
@@ -208,15 +238,13 @@ bool RevoluteJointModel::enforcePositionBounds(double* values, const Bounds& bou
     if (values[0] < bounds[0].min_position_)
     {
       values[0] = bounds[0].min_position_;
-      return true;
     }
     else if (values[0] > bounds[0].max_position_)
     {
       values[0] = bounds[0].max_position_;
-      return true;
     }
   }
-  return false;
+  return true;
 }
 
 void RevoluteJointModel::computeTransform(const double* joint_values, Eigen::Isometry3d& transf) const

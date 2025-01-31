@@ -36,67 +36,99 @@
 
 // Modified by Pilz GmbH & Co. KG
 
-#include "pilz_industrial_motion_planner/move_group_sequence_action.h"
+#include <pilz_industrial_motion_planner/move_group_sequence_action.hpp>
 
 #include <time.h>
 
-#include <moveit/kinematic_constraints/utils.h>
-#include <moveit/plan_execution/plan_execution.h>
-#include <moveit/plan_execution/plan_with_sensing.h>
-#include <moveit/planning_pipeline/planning_pipeline.h>
-#include <moveit/robot_state/conversions.h>
-#include <moveit/trajectory_processing/trajectory_tools.h>
-#include <moveit/utils/message_checks.h>
+#include <moveit/kinematic_constraints/utils.hpp>
+#include <moveit/plan_execution/plan_execution.hpp>
+#include <moveit/planning_pipeline/planning_pipeline.hpp>
+#include <moveit/robot_state/conversions.hpp>
+#include <moveit/trajectory_processing/trajectory_tools.hpp>
+#include <moveit/utils/message_checks.hpp>
+#include <moveit/moveit_cpp/moveit_cpp.hpp>
+#include <moveit/utils/logger.hpp>
 
-#include "pilz_industrial_motion_planner/command_list_manager.h"
-#include "pilz_industrial_motion_planner/trajectory_generation_exceptions.h"
+#include <pilz_industrial_motion_planner/command_list_manager.hpp>
+#include <pilz_industrial_motion_planner/trajectory_generation_exceptions.hpp>
 
 namespace pilz_industrial_motion_planner
 {
-MoveGroupSequenceAction::MoveGroupSequenceAction() : MoveGroupCapability("SequenceAction")
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.planners.pilz.move_group_sequence_action");
+}
+}  // namespace
+
+MoveGroupSequenceAction::MoveGroupSequenceAction()
+  : MoveGroupCapability("SequenceAction")
+  , move_feedback_(std::make_shared<moveit_msgs::action::MoveGroupSequence::Feedback>())
 {
 }
 
 void MoveGroupSequenceAction::initialize()
 {
   // start the move action server
-  ROS_INFO_STREAM("initialize move group sequence action");
-  move_action_server_.reset(new actionlib::SimpleActionServer<moveit_msgs::MoveGroupSequenceAction>(
-      root_node_handle_, "sequence_move_group",
-      boost::bind(&MoveGroupSequenceAction::executeSequenceCallback, this, _1), false));
-  move_action_server_->registerPreemptCallback(boost::bind(&MoveGroupSequenceAction::preemptMoveCallback, this));
-  move_action_server_->start();
+  RCLCPP_INFO_STREAM(getLogger(), "initialize move group sequence action");
+  // Use MutuallyExclusiveCallbackGroup to prevent race conditions in callbacks.
+  // See: https://github.com/moveit/moveit2/issues/3117 for details.
+  action_callback_group_ =
+      context_->moveit_cpp_->getNode()->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+  move_action_server_ = rclcpp_action::create_server<moveit_msgs::action::MoveGroupSequence>(
+      context_->moveit_cpp_->getNode(), "sequence_move_group",
+      [](const rclcpp_action::GoalUUID& /* unused */,
+         const std::shared_ptr<const moveit_msgs::action::MoveGroupSequence::Goal>& /* unused */) {
+        RCLCPP_DEBUG(getLogger(), "Received action goal");
+        return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+      },
+      [this](const std::shared_ptr<MoveGroupSequenceGoalHandle>& /* unused goal_handle */) {
+        RCLCPP_DEBUG(getLogger(), "Canceling action goal");
+        preemptMoveCallback();
+        return rclcpp_action::CancelResponse::ACCEPT;
+      },
+      [this](const std::shared_ptr<MoveGroupSequenceGoalHandle>& goal_handle) {
+        RCLCPP_DEBUG(getLogger(), "Accepting new action goal");
+        executeSequenceCallback(goal_handle);
+      },
+      rcl_action_server_get_default_options(), action_callback_group_);
 
-  command_list_manager_.reset(new pilz_industrial_motion_planner::CommandListManager(
-      ros::NodeHandle("~"), context_->planning_scene_monitor_->getRobotModel()));
+  command_list_manager_ = std::make_unique<pilz_industrial_motion_planner::CommandListManager>(
+      context_->moveit_cpp_->getNode(), context_->planning_scene_monitor_->getRobotModel());
 }
 
-void MoveGroupSequenceAction::executeSequenceCallback(const moveit_msgs::MoveGroupSequenceGoalConstPtr& goal)
+void MoveGroupSequenceAction::executeSequenceCallback(const std::shared_ptr<MoveGroupSequenceGoalHandle>& goal_handle)
 {
+  // Notify that goal is being executed
+  goal_handle_ = goal_handle;
+  const auto goal = goal_handle->get_goal();
+
   setMoveState(move_group::PLANNING);
 
   // Handle empty requests
   if (goal->request.items.empty())
   {
-    ROS_WARN("Received empty request. That's ok but maybe not what you intended.");
+    RCLCPP_WARN(getLogger(), "Received empty request. That's ok but maybe not what you intended.");
     setMoveState(move_group::IDLE);
-    moveit_msgs::MoveGroupSequenceResult action_res;
-    action_res.response.error_code.val = moveit_msgs::MoveItErrorCodes::SUCCESS;
-    move_action_server_->setSucceeded(action_res, "Received empty request.");
+    const auto action_res = std::make_shared<moveit_msgs::action::MoveGroupSequence::Result>();
+    action_res->response.error_code.val = moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+    goal_handle->succeed(action_res);
     return;
   }
 
   // before we start planning, ensure that we have the latest robot state
   // received...
-  context_->planning_scene_monitor_->waitForCurrentRobotState(ros::Time::now());
+  auto node = context_->moveit_cpp_->getNode();
+  context_->planning_scene_monitor_->waitForCurrentRobotState(node->get_clock()->now());
   context_->planning_scene_monitor_->updateFrameTransforms();
 
-  moveit_msgs::MoveGroupSequenceResult action_res;
+  const auto action_res = std::make_shared<moveit_msgs::action::MoveGroupSequence::Result>();
   if (goal->planning_options.plan_only || !context_->allow_trajectory_execution_)
   {
     if (!goal->planning_options.plan_only)
     {
-      ROS_WARN("Only plan will be calculated, although plan_only == false.");  // LCOV_EXCL_LINE
+      RCLCPP_WARN(getLogger(), "Only plan will be calculated, although plan_only == false.");  // LCOV_EXCL_LINE
     }
     executeMoveCallbackPlanOnly(goal, action_res);
   }
@@ -105,63 +137,58 @@ void MoveGroupSequenceAction::executeSequenceCallback(const moveit_msgs::MoveGro
     executeSequenceCallbackPlanAndExecute(goal, action_res);
   }
 
-  switch (action_res.response.error_code.val)
+  switch (action_res->response.error_code.val)
   {
-    case moveit_msgs::MoveItErrorCodes::SUCCESS:
-      move_action_server_->setSucceeded(action_res, "Success");
+    case moveit_msgs::msg::MoveItErrorCodes::SUCCESS:
+      goal_handle->succeed(action_res);
       break;
-    case moveit_msgs::MoveItErrorCodes::PREEMPTED:
-      move_action_server_->setPreempted(action_res, "Preempted");
+    case moveit_msgs::msg::MoveItErrorCodes::PREEMPTED:
+      goal_handle->canceled(action_res);
       break;
     default:
-      move_action_server_->setAborted(action_res, "See error code for more information");
+      goal_handle->abort(action_res);
       break;
   }
 
   setMoveState(move_group::IDLE);
+  goal_handle_.reset();
 }
 
 void MoveGroupSequenceAction::executeSequenceCallbackPlanAndExecute(
-    const moveit_msgs::MoveGroupSequenceGoalConstPtr& goal, moveit_msgs::MoveGroupSequenceResult& action_res)
+    const moveit_msgs::action::MoveGroupSequence::Goal::ConstSharedPtr& goal,
+    const moveit_msgs::action::MoveGroupSequence::Result::SharedPtr& action_res)
 {
-  ROS_INFO("Combined planning and execution request received for "
-           "MoveGroupSequenceAction.");
+  RCLCPP_INFO(getLogger(), "Combined planning and execution request received for MoveGroupSequenceAction.");
 
   plan_execution::PlanExecution::Options opt;
-
-  const moveit_msgs::PlanningScene& planning_scene_diff =
+  const moveit_msgs::msg::PlanningScene& planning_scene_diff =
       moveit::core::isEmpty(goal->planning_options.planning_scene_diff.robot_state) ?
           goal->planning_options.planning_scene_diff :
           clearSceneRobotState(goal->planning_options.planning_scene_diff);
 
-  opt.replan_ = goal->planning_options.replan;
-  opt.replan_attempts_ = goal->planning_options.replan_attempts;
-  opt.replan_delay_ = goal->planning_options.replan_delay;
-  opt.before_execution_callback_ = boost::bind(&MoveGroupSequenceAction::startMoveExecutionCallback, this);
+  opt.replan = goal->planning_options.replan;
+  opt.replan_attemps = goal->planning_options.replan_attempts;
+  opt.replan_delay = goal->planning_options.replan_delay;
+  opt.before_execution_callback_ = [this] { startMoveExecutionCallback(); };
 
-  opt.plan_callback_ =
-      boost::bind(&MoveGroupSequenceAction::planUsingSequenceManager, this, boost::cref(goal->request), _1);
-
-  if (goal->planning_options.look_around && context_->plan_with_sensing_)
-  {
-    ROS_WARN("Plan with sensing not yet implemented/tested. This option is "
-             "ignored.");  // LCOV_EXCL_LINE
-  }
+  opt.plan_callback = [this, &request = goal->request](plan_execution::ExecutableMotionPlan& plan) {
+    return planUsingSequenceManager(request, plan);
+  };
 
   plan_execution::ExecutableMotionPlan plan;
   context_->plan_execution_->planAndExecute(plan, planning_scene_diff, opt);
 
   StartStatesMsg start_states_msg;
-  convertToMsg(plan.plan_components_, start_states_msg, action_res.response.planned_trajectories);
+  convertToMsg(plan.plan_components, start_states_msg, action_res->response.planned_trajectories);
   try
   {
-    action_res.response.sequence_start = start_states_msg.at(0);
+    action_res->response.sequence_start = start_states_msg.at(0);
   }
   catch (std::out_of_range&)
   {
-    ROS_WARN("Can not determine start state from empty sequence.");
+    RCLCPP_WARN(getLogger(), "Can not determine start state from empty sequence.");
   }
-  action_res.response.error_code = plan.error_code_;
+  action_res->response.error_code = plan.error_code;
 }
 
 void MoveGroupSequenceAction::convertToMsg(const ExecutableTrajs& trajs, StartStatesMsg& start_states_msg,
@@ -171,15 +198,16 @@ void MoveGroupSequenceAction::convertToMsg(const ExecutableTrajs& trajs, StartSt
   planned_trajs_msgs.resize(trajs.size());
   for (size_t i = 0; i < trajs.size(); ++i)
   {
-    robot_state::robotStateToRobotStateMsg(trajs.at(i).trajectory_->getFirstWayPoint(), start_states_msg.at(i));
-    trajs.at(i).trajectory_->getRobotTrajectoryMsg(planned_trajs_msgs.at(i));
+    moveit::core::robotStateToRobotStateMsg(trajs.at(i).trajectory->getFirstWayPoint(), start_states_msg.at(i));
+    trajs.at(i).trajectory->getRobotTrajectoryMsg(planned_trajs_msgs.at(i));
   }
 }
 
-void MoveGroupSequenceAction::executeMoveCallbackPlanOnly(const moveit_msgs::MoveGroupSequenceGoalConstPtr& goal,
-                                                          moveit_msgs::MoveGroupSequenceResult& res)
+void MoveGroupSequenceAction::executeMoveCallbackPlanOnly(
+    const moveit_msgs::action::MoveGroupSequence::Goal::ConstSharedPtr& goal,
+    const moveit_msgs::action::MoveGroupSequence::Result::SharedPtr& action_res)
 {
-  ROS_INFO("Planning request received for MoveGroupSequenceAction action.");
+  RCLCPP_INFO(getLogger(), "Planning request received for MoveGroupSequenceAction action.");
 
   // lock the scene so that it does not modify the world representation while
   // diff() is called
@@ -190,84 +218,107 @@ void MoveGroupSequenceAction::executeMoveCallbackPlanOnly(const moveit_msgs::Mov
           static_cast<const planning_scene::PlanningSceneConstPtr&>(lscene) :
           lscene->diff(goal->planning_options.planning_scene_diff);
 
-  ros::Time planning_start = ros::Time::now();
+  rclcpp::Time planning_start = context_->moveit_cpp_->getNode()->now();
   RobotTrajCont traj_vec;
   try
   {
-    traj_vec = command_list_manager_->solve(the_scene, context_->planning_pipeline_, goal->request);
+    // Select planning_pipeline to handle request
+    // All motions in the SequenceRequest need to use the same planning pipeline (but can use different planners)
+    const planning_pipeline::PlanningPipelinePtr planning_pipeline =
+        resolvePlanningPipeline(goal->request.items[0].req.pipeline_id);
+    if (!planning_pipeline)
+    {
+      RCLCPP_ERROR_STREAM(getLogger(), "Could not load planning pipeline " << goal->request.items[0].req.pipeline_id);
+      action_res->response.error_code.val = moveit_msgs::msg::MoveItErrorCodes::FAILURE;
+      return;
+    }
+
+    traj_vec = command_list_manager_->solve(the_scene, planning_pipeline, goal->request);
   }
   catch (const MoveItErrorCodeException& ex)
   {
-    ROS_ERROR_STREAM("> Planning pipeline threw an exception (error code: " << ex.getErrorCode() << "): " << ex.what());
-    res.response.error_code.val = ex.getErrorCode();
+    RCLCPP_ERROR_STREAM(getLogger(), "> Planning pipeline threw an exception (error code: " << ex.getErrorCode()
+                                                                                            << "): " << ex.what());
+    action_res->response.error_code.val = ex.getErrorCode();
     return;
   }
   // LCOV_EXCL_START // Keep moveit up even if lower parts throw
   catch (const std::exception& ex)
   {
-    ROS_ERROR("Planning pipeline threw an exception: %s", ex.what());
-    res.response.error_code.val = moveit_msgs::MoveItErrorCodes::FAILURE;
+    RCLCPP_ERROR(getLogger(), "Planning pipeline threw an exception: %s", ex.what());
+    action_res->response.error_code.val = moveit_msgs::msg::MoveItErrorCodes::FAILURE;
     return;
   }
   // LCOV_EXCL_STOP
 
   StartStatesMsg start_states_msg;
   start_states_msg.resize(traj_vec.size());
-  res.response.planned_trajectories.resize(traj_vec.size());
+  action_res->response.planned_trajectories.resize(traj_vec.size());
   for (RobotTrajCont::size_type i = 0; i < traj_vec.size(); ++i)
   {
     move_group::MoveGroupCapability::convertToMsg(traj_vec.at(i), start_states_msg.at(i),
-                                                  res.response.planned_trajectories.at(i));
+                                                  action_res->response.planned_trajectories.at(i));
   }
   try
   {
-    res.response.sequence_start = start_states_msg.at(0);
+    action_res->response.sequence_start = start_states_msg.at(0);
   }
   catch (std::out_of_range&)
   {
-    ROS_WARN("Can not determine start state from empty sequence.");
+    RCLCPP_WARN(getLogger(), "Can not determine start state from empty sequence.");
   }
 
-  res.response.error_code.val = moveit_msgs::MoveItErrorCodes::SUCCESS;
-  res.response.planning_time = ros::Time::now().toSec() - planning_start.toSec();
+  action_res->response.error_code.val = moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+  action_res->response.planning_time = (context_->moveit_cpp_->getNode()->now() - planning_start).seconds();
 }
 
-bool MoveGroupSequenceAction::planUsingSequenceManager(const moveit_msgs::MotionSequenceRequest& req,
+bool MoveGroupSequenceAction::planUsingSequenceManager(const moveit_msgs::msg::MotionSequenceRequest& req,
                                                        plan_execution::ExecutableMotionPlan& plan)
 {
   setMoveState(move_group::PLANNING);
 
-  planning_scene_monitor::LockedPlanningSceneRO lscene(plan.planning_scene_monitor_);
+  planning_scene_monitor::LockedPlanningSceneRO lscene(plan.planning_scene_monitor);
   RobotTrajCont traj_vec;
   try
   {
-    traj_vec = command_list_manager_->solve(plan.planning_scene_, context_->planning_pipeline_, req);
+    // Select planning_pipeline to handle request
+    // All motions in the SequenceRequest need to use the same planning pipeline (but can use different planners)
+    const planning_pipeline::PlanningPipelinePtr planning_pipeline =
+        resolvePlanningPipeline(req.items[0].req.pipeline_id);
+    if (!planning_pipeline)
+    {
+      RCLCPP_ERROR_STREAM(getLogger(), "Could not load planning pipeline " << req.items[0].req.pipeline_id);
+      return false;
+    }
+
+    traj_vec = command_list_manager_->solve(plan.planning_scene, planning_pipeline, req);
   }
   catch (const MoveItErrorCodeException& ex)
   {
-    ROS_ERROR_STREAM("Planning pipeline threw an exception (error code: " << ex.getErrorCode() << "): " << ex.what());
-    plan.error_code_.val = ex.getErrorCode();
+    RCLCPP_ERROR_STREAM(getLogger(), "Planning pipeline threw an exception (error code: " << ex.getErrorCode()
+                                                                                          << "): " << ex.what());
+    plan.error_code.val = ex.getErrorCode();
     return false;
   }
-  // LCOV_EXCL_START // Keep moveit up even if lower parts throw
+  // LCOV_EXCL_START // Keep MoveIt up even if lower parts throw
   catch (const std::exception& ex)
   {
-    ROS_ERROR_STREAM("Planning pipeline threw an exception: " << ex.what());
-    plan.error_code_.val = moveit_msgs::MoveItErrorCodes::FAILURE;
+    RCLCPP_ERROR_STREAM(getLogger(), "Planning pipeline threw an exception: " << ex.what());
+    plan.error_code.val = moveit_msgs::msg::MoveItErrorCodes::FAILURE;
     return false;
   }
   // LCOV_EXCL_STOP
 
   if (!traj_vec.empty())
   {
-    plan.plan_components_.resize(traj_vec.size());
+    plan.plan_components.resize(traj_vec.size());
     for (size_t i = 0; i < traj_vec.size(); ++i)
     {
-      plan.plan_components_.at(i).trajectory_ = traj_vec.at(i);
-      plan.plan_components_.at(i).description_ = "plan";
+      plan.plan_components.at(i).trajectory = traj_vec.at(i);
+      plan.plan_components.at(i).description = "plan";
     }
   }
-  plan.error_code_.val = moveit_msgs::MoveItErrorCodes::SUCCESS;
+  plan.error_code.val = moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
   return true;
 }
 
@@ -284,11 +335,11 @@ void MoveGroupSequenceAction::preemptMoveCallback()
 void MoveGroupSequenceAction::setMoveState(move_group::MoveGroupState state)
 {
   move_state_ = state;
-  move_feedback_.state = stateToStr(state);
-  move_action_server_->publishFeedback(move_feedback_);
+  move_feedback_->state = stateToStr(state);
+  goal_handle_->publish_feedback(move_feedback_);
 }
 
 }  // namespace pilz_industrial_motion_planner
 
-#include <pluginlib/class_list_macros.h>
+#include <pluginlib/class_list_macros.hpp>
 PLUGINLIB_EXPORT_CLASS(pilz_industrial_motion_planner::MoveGroupSequenceAction, move_group::MoveGroupCapability)

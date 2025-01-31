@@ -34,77 +34,102 @@
 
 /* Author: Mathias Lüdtke */
 
-#include <ros/ros.h>
-
-#include <moveit/macros/class_forward.h>
-
-#include <moveit_ros_control_interface/ControllerHandle.h>
-
-#include <moveit/controller_manager/controller_manager.h>
-
-#include <controller_manager_msgs/ListControllers.h>
-#include <controller_manager_msgs/SwitchController.h>
-
+#include <moveit/macros/class_forward.hpp>
+#include <moveit/utils/rclcpp_utils.hpp>
+#include <moveit_ros_control_interface/ControllerHandle.hpp>
+#include <moveit/controller_manager/controller_manager.hpp>
+#include <controller_manager_msgs/srv/list_controllers.hpp>
+#include <controller_manager_msgs/srv/switch_controller.hpp>
 #include <pluginlib/class_list_macros.hpp>
 #include <pluginlib/class_loader.hpp>
-
 #include <boost/bimap.hpp>
-
+#include <boost/bimap/unordered_multiset_of.hpp>
+#include <rclcpp/client.hpp>
+#include <rclcpp/duration.hpp>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <rclcpp/node.hpp>
+#include <rclcpp/parameter_value.hpp>
+#include <rclcpp/time.hpp>
 #include <map>
 #include <memory>
+#include <queue>
+#include <moveit/utils/logger.hpp>
+
+static const rclcpp::Duration CONTROLLER_INFORMATION_VALIDITY_AGE = rclcpp::Duration::from_seconds(1.0);
+static const double SERVICE_CALL_TIMEOUT = 1.0;
 
 namespace moveit_ros_control_interface
 {
-/**
- * \brief check for timeout
- * @param t timestamp to check, is update if timeout duration was passed
- * @param[in] timeout timeout duration in seconds
- * @param[in] force force timeout
- * @return True if timeout duration was passed
- */
-bool checkTimeout(ros::Time& t, double timeout, bool force = false)
+namespace
 {
-  ros::Time now = ros::Time::now();
-  if (force || (now - t) >= ros::Duration(timeout))
-  {
-    t = now;
-    return true;
-  }
-  return false;
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.plugins.ros_control_interface");
+}
+}  // namespace
+
+/**
+ * \brief Get joint name from resource name reported by ros2_control, since claimed_interfaces return by ros2_control
+ * will have the interface name as suffix joint_name/INTERFACE_TYPE
+ * @param[in] claimed_interface claimed interface as joint_name/INTERFACE_TYPE
+ * @return joint_name part of the /p claimed_interface
+ */
+std::string parseJointNameFromResource(const std::string& claimed_interface)
+{
+  const auto index = claimed_interface.find('/');
+  if (index == std::string::npos)
+    return claimed_interface;
+  return claimed_interface.substr(0, index);
 }
 
-MOVEIT_CLASS_FORWARD(MoveItControllerManager)  // Defines MoveItControllerManagerPtr, ConstPtr, WeakPtr... etc
+MOVEIT_CLASS_FORWARD(Ros2ControlManager);  // Defines Ros2ControlManagerPtr, ConstPtr, WeakPtr... etc
 
 /**
- * \brief moveit_controller_manager::MoveItControllerManager sub class that interfaces one ros_control
+ * \brief moveit_controller_manager::Ros2ControlManager sub class that interfaces one ros_control
  * controller_manager
  * instance.
  * All services and names are relative to ns_.
  */
-class MoveItControllerManager : public moveit_controller_manager::MoveItControllerManager
+class Ros2ControlManager : public moveit_controller_manager::MoveItControllerManager
 {
-  const std::string ns_;
+  std::string ns_;
   pluginlib::ClassLoader<ControllerHandleAllocator> loader_;
-  typedef std::map<std::string, controller_manager_msgs::ControllerState> ControllersMap;
+  typedef std::map<std::string, controller_manager_msgs::msg::ControllerState> ControllersMap;
+
+  /** @brief Controllers that can be activated and deactivated by this plugin. */
   ControllersMap managed_controllers_;
+  /** @brief Controllers that are currently active. */
   ControllersMap active_controllers_;
+
   typedef std::map<std::string, ControllerHandleAllocatorPtr> AllocatorsMap;
   AllocatorsMap allocators_;
 
   typedef std::map<std::string, moveit_controller_manager::MoveItControllerHandlePtr> HandleMap;
   HandleMap handles_;
 
-  ros::Time controllers_stamp_;
-  boost::mutex controllers_mutex_;
+  rclcpp::Time controllers_stamp_{ 0, 0, RCL_ROS_TIME };
+
+  /**
+   * @brief Protects access to managed_controllers_, active_controllers_, allocators_, handles_, and controllers_stamp.
+   */
+  std::mutex controllers_mutex_;
+
+  rclcpp::Node::SharedPtr node_;
+  rclcpp::Client<controller_manager_msgs::srv::ListControllers>::SharedPtr list_controllers_service_;
+  rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedPtr switch_controller_service_;
+
+  // Chained controllers have dependencies (other controllers which must be running)
+  std::unordered_map<std::string /* controller name */, std::vector<std::string> /* dependencies */> dependency_map_;
 
   /**
    * \brief Check if given controller is active
    * @param s state of controller
    * @return true if controller is active
    */
-  static bool isActive(const controller_manager_msgs::ControllerState& s)
+  static bool isActive(const controller_manager_msgs::msg::ControllerState& s)
   {
-    return s.state == std::string("running");
+    return s.state == std::string("active");
   }
 
   /**
@@ -115,27 +140,63 @@ class MoveItControllerManager : public moveit_controller_manager::MoveItControll
    */
   void discover(bool force = false)
   {
-    if (!checkTimeout(controllers_stamp_, 1.0, force))
-      return;
-
-    controller_manager_msgs::ListControllers srv;
-    if (!ros::service::call(getAbsName("controller_manager/list_controllers"), srv))
+    // Skip if controller stamp is too new for new discovery, enforce update if force==true
+    if (!force && ((node_->now() - controllers_stamp_) < CONTROLLER_INFORMATION_VALIDITY_AGE))
     {
-      ROS_WARN_STREAM("Failed to read controllers from " << ns_ << "controller_manager/list_controllers");
+      return;
     }
+
+    controllers_stamp_ = node_->now();
+
+    auto request = std::make_shared<controller_manager_msgs::srv::ListControllers::Request>();
+    auto result_future = list_controllers_service_->async_send_request(request);
+    if (result_future.wait_for(std::chrono::duration<double>(SERVICE_CALL_TIMEOUT)) == std::future_status::timeout)
+    {
+      RCLCPP_WARN_STREAM(getLogger(), "Failed to read controllers from "
+                                          << list_controllers_service_->get_service_name() << " within "
+                                          << SERVICE_CALL_TIMEOUT << " seconds");
+      return;
+    }
+
     managed_controllers_.clear();
     active_controllers_.clear();
-    for (const controller_manager_msgs::ControllerState& controller : srv.response.controller)
+
+    auto result = result_future.get();
+    if (!Ros2ControlManager::fixChainedControllers(result))
     {
+      return;
+    }
+
+    for (const controller_manager_msgs::msg::ControllerState& controller : result->controller)
+    {
+      // If the controller is active, add it to the map of active controllers.
       if (isActive(controller))
       {
-        active_controllers_.insert(std::make_pair(controller.name, controller));  // without namespace
+        // Get the names of the interfaces currently claimed by the active controller.
+        auto& claimed_interfaces = active_controllers_.insert(std::make_pair(controller.name, controller))
+                                       .first->second.claimed_interfaces;  // without namespace
+        // Modify the claimed interface names in-place to only include the name of the joint and not the command type
+        // (e.g. position, velocity, etc.).
+        std::transform(claimed_interfaces.cbegin(), claimed_interfaces.cend(), claimed_interfaces.begin(),
+                       [](const std::string& claimed_interface) {
+                         return parseJointNameFromResource(claimed_interface);
+                       });
       }
+
+      // Instantiate a controller handle if one is available for this type of controller.
       if (loader_.isClassAvailable(controller.type))
       {
         std::string absname = getAbsName(controller.name);
-        managed_controllers_.insert(std::make_pair(absname, controller));  // with namespace
-        allocate(absname, controller);
+        auto controller_it = managed_controllers_.insert(std::make_pair(absname, controller)).first;  // with namespace
+        // Get the names of the interfaces that would be claimed by this currently-inactive controller if it was activated.
+        auto& required_interfaces = controller_it->second.required_command_interfaces;
+        // Modify the required interface names in-place to only include the name of the joint and not the command type
+        // (e.g. position, velocity, etc.).
+        std::transform(required_interfaces.cbegin(), required_interfaces.cend(), required_interfaces.begin(),
+                       [](const std::string& required_interface) {
+                         return parseJointNameFromResource(required_interface);
+                       });
+        allocate(absname, controller_it->second);
       }
     }
   }
@@ -146,64 +207,83 @@ class MoveItControllerManager : public moveit_controller_manager::MoveItControll
    * @param name fully qualified name of the controller
    * @param controller controller information
    */
-  void allocate(const std::string& name, const controller_manager_msgs::ControllerState& controller)
+  void allocate(const std::string& name, const controller_manager_msgs::msg::ControllerState& controller)
   {
     if (handles_.find(name) == handles_.end())
     {
       const std::string& type = controller.type;
       AllocatorsMap::iterator alloc_it = allocators_.find(type);
       if (alloc_it == allocators_.end())
-      {  // create allocator is needed
+      {  // create allocator if needed
         alloc_it = allocators_.insert(std::make_pair(type, loader_.createUniqueInstance(type))).first;
       }
 
       std::vector<std::string> resources;
       // Collect claimed resources across different hardware interfaces
-      for (const controller_manager_msgs::HardwareInterfaceResources& claimed_resource : controller.claimed_resources)
+      for (const auto& resource : controller.claimed_interfaces)
       {
-        for (const std::string& resource : claimed_resource.resources)
-        {
-          resources.push_back(resource);
-        }
+        resources.push_back(parseJointNameFromResource(resource));
       }
 
       moveit_controller_manager::MoveItControllerHandlePtr handle =
-          alloc_it->second->alloc(name, resources);  // allocate handle
+          alloc_it->second->alloc(node_, name, resources);  // allocate handle
       if (handle)
         handles_.insert(std::make_pair(name, handle));
     }
   }
 
   /**
-   * \brief get fully qualified name
+   * \brief Get fully qualified name
    * @param name name to be resolved to an absolute name
    * @return resolved name
    */
   std::string getAbsName(const std::string& name)
   {
-    return ros::names::append(ns_, name);
+    return rclcpp::names::append(ns_, name);
   }
 
 public:
   /**
    * \brief The default constructor. Reads the namespace from ~ros_control_namespace param and defaults to /
    */
-  MoveItControllerManager()
-    : ns_(ros::NodeHandle("~").param("ros_control_namespace", std::string("/")))
-    , loader_("moveit_ros_control_interface", "moveit_ros_control_interface::ControllerHandleAllocator")
+  Ros2ControlManager()
+    : loader_("moveit_ros_control_interface", "moveit_ros_control_interface::ControllerHandleAllocator")
   {
-    ROS_INFO_STREAM("Started moveit_ros_control_interface::MoveItControllerManager for namespace " << ns_);
   }
 
   /**
    * \brief Configure interface with namespace
    * @param ns namespace of ros_control node (without /controller_manager/)
    */
-  MoveItControllerManager(const std::string& ns)
+  Ros2ControlManager(const std::string& ns)
     : ns_(ns), loader_("moveit_ros_control_interface", "moveit_ros_control_interface::ControllerHandleAllocator")
   {
+    RCLCPP_INFO_STREAM(getLogger(), "Started moveit_ros_control_interface::Ros2ControlManager for namespace " << ns_);
   }
 
+  void initialize(const rclcpp::Node::SharedPtr& node) override
+  {
+    node_ = node;
+    if (ns_.empty())
+    {
+      if (!node_->has_parameter("ros_control_namespace"))
+      {
+        ns_ = node_->declare_parameter<std::string>("ros_control_namespace", "/");
+      }
+      else
+      {
+        node_->get_parameter<std::string>("ros_control_namespace", ns_);
+      }
+    }
+
+    list_controllers_service_ = node_->create_client<controller_manager_msgs::srv::ListControllers>(
+        getAbsName("controller_manager/list_controllers"));
+    switch_controller_service_ = node_->create_client<controller_manager_msgs::srv::SwitchController>(
+        getAbsName("controller_manager/switch_controller"));
+
+    std::scoped_lock<std::mutex> lock(controllers_mutex_);
+    discover(true);
+  }
   /**
    * \brief Find and return the pre-allocated handle for the given controller.
    * @param name
@@ -211,10 +291,10 @@ public:
    */
   moveit_controller_manager::MoveItControllerHandlePtr getControllerHandle(const std::string& name) override
   {
-    boost::mutex::scoped_lock lock(controllers_mutex_);
+    std::scoped_lock<std::mutex> lock(controllers_mutex_);
     HandleMap::iterator it = handles_.find(name);
     if (it != handles_.end())
-    {  // controller is is manager by this interface
+    {  // controller is manager by this interface
       return it->second;
     }
     return moveit_controller_manager::MoveItControllerHandlePtr();
@@ -226,10 +306,10 @@ public:
    */
   void getControllersList(std::vector<std::string>& names) override
   {
-    boost::mutex::scoped_lock lock(controllers_mutex_);
+    std::scoped_lock<std::mutex> lock(controllers_mutex_);
     discover();
 
-    for (std::pair<const std::string, controller_manager_msgs::ControllerState>& managed_controller :
+    for (std::pair<const std::string, controller_manager_msgs::msg::ControllerState>& managed_controller :
          managed_controllers_)
     {
       names.push_back(managed_controller.first);
@@ -242,10 +322,10 @@ public:
    */
   void getActiveControllers(std::vector<std::string>& names) override
   {
-    boost::mutex::scoped_lock lock(controllers_mutex_);
+    std::scoped_lock<std::mutex> lock(controllers_mutex_);
     discover();
 
-    for (std::pair<const std::string, controller_manager_msgs::ControllerState>& managed_controller :
+    for (std::pair<const std::string, controller_manager_msgs::msg::ControllerState>& managed_controller :
          managed_controllers_)
     {
       if (isActive(managed_controller.second))
@@ -254,20 +334,19 @@ public:
   }
 
   /**
-   * \brief Read resources from cached controller states
+   * \brief Read interface names required by each controller from the cached controller state info.
    * @param[in] name name of controller (with namespace)
    * @param[out] joints
    */
   void getControllerJoints(const std::string& name, std::vector<std::string>& joints) override
   {
-    boost::mutex::scoped_lock lock(controllers_mutex_);
+    std::scoped_lock<std::mutex> lock(controllers_mutex_);
     ControllersMap::iterator it = managed_controllers_.find(name);
     if (it != managed_controllers_.end())
     {
-      for (controller_manager_msgs::HardwareInterfaceResources& claimed_resource : it->second.claimed_resources)
+      for (const auto& required_resource : it->second.required_command_interfaces)
       {
-        std::vector<std::string>& resources = claimed_resource.resources;
-        joints.insert(joints.end(), resources.begin(), resources.end());
+        joints.push_back(required_resource);
       }
     }
   }
@@ -279,7 +358,7 @@ public:
    */
   ControllerState getControllerState(const std::string& name) override
   {
-    boost::mutex::scoped_lock lock(controllers_mutex_);
+    std::scoped_lock<std::mutex> lock(controllers_mutex_);
     discover();
 
     ControllerState c;
@@ -294,122 +373,203 @@ public:
   /**
    * \brief Filter lists for managed controller and computes switching set.
    * Stopped list might be extended by unsupported controllers that claim needed resources
-   * @param activate
-   * @param deactivate
+   * @param activate vector of controllers to be activated
+   * @param deactivate vector of controllers to be deactivated
    * @return true if switching succeeded
    */
-  bool switchControllers(const std::vector<std::string>& activate, const std::vector<std::string>& deactivate) override
+  bool switchControllers(const std::vector<std::string>& activate_base,
+                         const std::vector<std::string>& deactivate_base) override
   {
-    boost::mutex::scoped_lock lock(controllers_mutex_);
+    // add controller dependencies
+    std::vector<std::string> activate = activate_base;
+    std::vector<std::string> deactivate = deactivate_base;
+    for (auto controllers : { &activate, &deactivate })
+    {
+      auto queue = *controllers;
+      while (!queue.empty())
+      {
+        auto controller = queue.back();
+        controller.erase(0, 1);
+        queue.pop_back();
+        for (const auto& dependency : dependency_map_[controller])
+        {
+          queue.push_back(dependency);
+          controllers->push_back("/" + dependency);
+        }
+      }
+    }
+    // activation dependencies must be started first, but they are processed last, so the order needs to be flipped
+    std::reverse(activate.begin(), activate.end());
+
+    std::scoped_lock<std::mutex> lock(controllers_mutex_);
     discover(true);
 
-    typedef boost::bimap<std::string, std::string> resources_bimap;
+    // Holds the list of controllers that are currently active and their resources
+    // Example:
+    // controller1:
+    //  - controller1_joint1
+    //  - controller1_joint2
+    //  ...
+    // controller2:
+    //  - controller2_joint1
+    //  - controller2_joint2
+    //  ...
+    // ...
+    // The left type have to be an unordered_multiset_of, because each controller can claim multiple resources
+    // {{ "controller1", "controller1_joint1" },
+    //  { "controller1", "controller1_joint2" },
+    //  ...,
+    //  { "controller2", "controller2_joint1" },
+    //  { "controller2", "controller2_joint2" },
+    //  ...}
+    typedef boost::bimap<boost::bimaps::unordered_multiset_of<std::string>, std::string> resources_bimap;
 
     resources_bimap claimed_resources;
 
     // fill bimap with active controllers and their resources
-    for (std::pair<const std::string, controller_manager_msgs::ControllerState>& active_controller : active_controllers_)
+    for (std::pair<const std::string, controller_manager_msgs::msg::ControllerState>& active_controller :
+         active_controllers_)
     {
-      for (std::vector<controller_manager_msgs::HardwareInterfaceResources>::iterator hir =
-               active_controller.second.claimed_resources.begin();
-           hir != active_controller.second.claimed_resources.end(); ++hir)
+      for (const auto& resource : active_controller.second.claimed_interfaces)
       {
-        for (std::string& resource : hir->resources)
-        {
-          claimed_resources.insert(resources_bimap::value_type(active_controller.second.name, resource));
-        }
+        claimed_resources.insert(resources_bimap::value_type(active_controller.second.name, resource));
       }
     }
 
-    controller_manager_msgs::SwitchController srv;
-
+    auto request = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
     for (const std::string& it : deactivate)
     {
       ControllersMap::iterator c = managed_controllers_.find(it);
       if (c != managed_controllers_.end())
       {  // controller belongs to this manager
-        srv.request.stop_controllers.push_back(c->second.name);
-        claimed_resources.right.erase(c->second.name);  // remove resources
+        request->deactivate_controllers.push_back(c->second.name);
+        claimed_resources.left.erase(c->second.name);  // remove resources
       }
     }
 
+    // For each controller to activate, find conflicts between the interfaces required by that controller and the
+    // interfaces claimed by currently-active controllers.
     for (const std::string& it : activate)
     {
       ControllersMap::iterator c = managed_controllers_.find(it);
       if (c != managed_controllers_.end())
       {  // controller belongs to this manager
-        srv.request.start_controllers.push_back(c->second.name);
-        for (controller_manager_msgs::HardwareInterfaceResources& claimed_resource : c->second.claimed_resources)
+        request->activate_controllers.push_back(c->second.name);
+        for (const auto& required_resource : c->second.required_command_interfaces)
         {
-          for (const std::string& resource : claimed_resource.resources)
-          {  // for all claimed resource
-            resources_bimap::right_const_iterator res = claimed_resources.right.find(resource);
-            if (res != claimed_resources.right.end())
-            {                                                       // resource is claimed
-              srv.request.stop_controllers.push_back(res->second);  // add claiming controller to stop list
-              claimed_resources.left.erase(res->second);            // remove claimed resources
+          resources_bimap::right_const_iterator res = claimed_resources.right.find(required_resource);
+          if (res != claimed_resources.right.end())
+          {  // resource is claimed
+            if (std::find(request->deactivate_controllers.begin(), request->deactivate_controllers.end(),
+                          res->second) == request->deactivate_controllers.end())
+            {
+              request->deactivate_controllers.push_back(res->second);  // add claiming controller to stop list
             }
+            claimed_resources.left.erase(res->second);  // remove claimed resources
           }
         }
       }
     }
-    srv.request.strictness = srv.request.STRICT;
 
-    if (!srv.request.start_controllers.empty() || srv.request.stop_controllers.empty())
+    // Setting level to STRICT means that the controller switch will only be committed if all controllers are
+    // successfully activated or deactivated.
+    request->strictness = controller_manager_msgs::srv::SwitchController::Request::STRICT;
+
+    if (!request->activate_controllers.empty() || !request->deactivate_controllers.empty())
     {  // something to switch?
-      if (!ros::service::call(getAbsName("controller_manager/switch_controller"), srv))
+      auto result_future = switch_controller_service_->async_send_request(request);
+      if (result_future.wait_for(std::chrono::duration<double>(SERVICE_CALL_TIMEOUT)) == std::future_status::timeout)
       {
-        ROS_ERROR_STREAM("Could switch controllers at " << ns_);
+        RCLCPP_ERROR_STREAM(getLogger(), "Couldn't switch controllers at "
+                                             << switch_controller_service_->get_service_name() << " within "
+                                             << SERVICE_CALL_TIMEOUT << " seconds");
+        return false;
       }
       discover(true);
-      return srv.response.ok;
+      return result_future.get()->ok;
     }
+    return true;
+  }
+  /**
+   * \brief fixChainedControllers modifies ListControllers service response if it contains chained controllers.
+   * Since chained controllers cannot be written to directly, they are removed from the response and their interfaces
+   * are propagated back to the first controller with a non-chained input
+   */
+  bool fixChainedControllers(std::shared_ptr<controller_manager_msgs::srv::ListControllers::Response>& result)
+  {
+    std::unordered_map<std::string, size_t> controller_name_map;
+    for (size_t i = 0; i < result->controller.size(); ++i)
+    {
+      controller_name_map[result->controller[i].name] = i;
+    }
+    for (auto& controller : result->controller)
+    {
+      if (controller.chain_connections.size() > 1)
+      {
+        RCLCPP_ERROR_STREAM(getLogger(),
+                            "Controller with name %s chains to more than one controller. Chaining to more than "
+                            "one controller is not supported.");
+        return false;
+      }
+      dependency_map_[controller.name].clear();
+      for (const auto& chained_controller : controller.chain_connections)
+      {
+        auto ind = controller_name_map[chained_controller.name];
+        dependency_map_[controller.name].push_back(chained_controller.name);
+        controller.required_command_interfaces = result->controller[ind].required_command_interfaces;
+        controller.claimed_interfaces = result->controller[ind].claimed_interfaces;
+        result->controller[ind].claimed_interfaces.clear();
+        result->controller[ind].required_command_interfaces.clear();
+      }
+    }
+
     return true;
   }
 };
 /**
- *  \brief MoveItMultiControllerManager discovers all running ros_control node and delegates member function to the
- * corresponding MoveItControllerManager instances
+ *  \brief Ros2ControlMultiManager discovers all running ros_control node and delegates member function to the
+ * corresponding Ros2ControlManager instances
  */
-class MoveItMultiControllerManager : public moveit_controller_manager::MoveItControllerManager
+class Ros2ControlMultiManager : public moveit_controller_manager::MoveItControllerManager
 {
-  typedef std::map<std::string, moveit_ros_control_interface::MoveItControllerManagerPtr> ControllerManagersMap;
+  typedef std::map<std::string, moveit_ros_control_interface::Ros2ControlManagerPtr> ControllerManagersMap;
   ControllerManagersMap controller_managers_;
-  ros::Time controller_managers_stamp_;
-  boost::mutex controller_managers_mutex_;
+  rclcpp::Time controller_managers_stamp_{ 0, 0, RCL_ROS_TIME };
+  std::mutex controller_managers_mutex_;
 
+  rclcpp::Node::SharedPtr node_;
+
+  void initialize(const rclcpp::Node::SharedPtr& node) override
+  {
+    node_ = node;
+  }
   /**
-   * \brief  Poll ROS master for services and filters all controller_manager/list_controllers instances
+   * \brief  Poll for services and filter all controller_manager/list_controllers instances
    * Throttled down to 1 Hz, controller_managers_mutex_ must be locked externally
    */
   void discover()
   {
-    if (!checkTimeout(controller_managers_stamp_, 1.0))
+    // Skip if last discovery is too new for discovery rate
+    if ((node_->now() - controller_managers_stamp_) < CONTROLLER_INFORMATION_VALIDITY_AGE)
       return;
 
-    XmlRpc::XmlRpcValue args, result, system_state;
-    args[0] = ros::this_node::getName();
+    controller_managers_stamp_ = node_->now();
 
-    if (!ros::master::execute("getSystemState", args, result, system_state, true))
+    const std::map<std::string, std::vector<std::string>> services = node_->get_service_names_and_types();
+
+    for (const auto& service : services)
     {
-      return;
-    }
-
-    // refer to http://wiki.ros.org/ROS/Master_API#Name_service_and_system_state
-    XmlRpc::XmlRpcValue services = system_state[2];
-
-    for (int i = 0; i < services.size(); ++i)  // NOLINT(modernize-loop-convert)
-    {
-      std::string service = services[i][0];
-      std::size_t found = service.find("controller_manager/list_controllers");
+      const auto& service_name = service.first;
+      std::size_t found = service_name.find("controller_manager/list_controllers");
       if (found != std::string::npos)
       {
-        std::string ns = service.substr(0, found);
+        std::string ns = service_name.substr(0, found);
         if (controller_managers_.find(ns) == controller_managers_.end())
-        {  // create MoveItControllerManager if it does not exists
-          ROS_INFO_STREAM("Adding controller_manager interface for node at namespace " << ns);
-          controller_managers_.insert(
-              std::make_pair(ns, std::make_shared<moveit_ros_control_interface::MoveItControllerManager>(ns)));
+        {  // create Ros2ControlManager if it does not exist
+          RCLCPP_INFO_STREAM(getLogger(), "Adding controller_manager interface for node at namespace " << ns);
+          auto controller_manager = std::make_shared<moveit_ros_control_interface::Ros2ControlManager>(ns);
+          controller_manager->initialize(node_);
+          controller_managers_.insert(std::make_pair(ns, controller_manager));
         }
       }
     }
@@ -436,7 +596,7 @@ public:
    */
   moveit_controller_manager::MoveItControllerHandlePtr getControllerHandle(const std::string& name) override
   {
-    boost::mutex::scoped_lock lock(controller_managers_mutex_);
+    std::unique_lock<std::mutex> lock(controller_managers_mutex_);
 
     std::string ns = getNamespace(name);
     ControllerManagersMap::iterator it = controller_managers_.find(ns);
@@ -453,10 +613,10 @@ public:
    */
   void getControllersList(std::vector<std::string>& names) override
   {
-    boost::mutex::scoped_lock lock(controller_managers_mutex_);
+    std::unique_lock<std::mutex> lock(controller_managers_mutex_);
     discover();
 
-    for (std::pair<const std::string, moveit_ros_control_interface::MoveItControllerManagerPtr>& controller_manager :
+    for (std::pair<const std::string, moveit_ros_control_interface::Ros2ControlManagerPtr>& controller_manager :
          controller_managers_)
     {
       controller_manager.second->getControllersList(names);
@@ -469,10 +629,10 @@ public:
    */
   void getActiveControllers(std::vector<std::string>& names) override
   {
-    boost::mutex::scoped_lock lock(controller_managers_mutex_);
+    std::unique_lock<std::mutex> lock(controller_managers_mutex_);
     discover();
 
-    for (std::pair<const std::string, moveit_ros_control_interface::MoveItControllerManagerPtr>& controller_manager :
+    for (std::pair<const std::string, moveit_ros_control_interface::Ros2ControlManagerPtr>& controller_manager :
          controller_managers_)
     {
       controller_manager.second->getActiveControllers(names);
@@ -486,7 +646,7 @@ public:
    */
   void getControllerJoints(const std::string& name, std::vector<std::string>& joints) override
   {
-    boost::mutex::scoped_lock lock(controller_managers_mutex_);
+    std::unique_lock<std::mutex> lock(controller_managers_mutex_);
 
     std::string ns = getNamespace(name);
     ControllerManagersMap::iterator it = controller_managers_.find(ns);
@@ -503,7 +663,7 @@ public:
    */
   ControllerState getControllerState(const std::string& name) override
   {
-    boost::mutex::scoped_lock lock(controller_managers_mutex_);
+    std::unique_lock<std::mutex> lock(controller_managers_mutex_);
 
     std::string ns = getNamespace(name);
     ControllerManagersMap::iterator it = controller_managers_.find(ns);
@@ -515,16 +675,16 @@ public:
   }
 
   /**
-   * \brief delegates switch  to all known interfaces. Stops on first failing switch.
-   * @param activate
-   * @param deactivate
-   * @return
+   * \brief delegates switch to all known interfaces. Stops on first failing switch.
+   * @param activate vector of controllers to be activated
+   * @param deactivate vector of controllers to be deactivated
+   * @return true if switching succeeded
    */
   bool switchControllers(const std::vector<std::string>& activate, const std::vector<std::string>& deactivate) override
   {
-    boost::mutex::scoped_lock lock(controller_managers_mutex_);
+    std::unique_lock<std::mutex> lock(controller_managers_mutex_);
 
-    for (std::pair<const std::string, moveit_ros_control_interface::MoveItControllerManagerPtr>& controller_manager :
+    for (std::pair<const std::string, moveit_ros_control_interface::Ros2ControlManagerPtr>& controller_manager :
          controller_managers_)
     {
       if (!controller_manager.second->switchControllers(activate, deactivate))
@@ -536,8 +696,8 @@ public:
 
 }  // namespace moveit_ros_control_interface
 
-PLUGINLIB_EXPORT_CLASS(moveit_ros_control_interface::MoveItControllerManager,
+PLUGINLIB_EXPORT_CLASS(moveit_ros_control_interface::Ros2ControlManager,
                        moveit_controller_manager::MoveItControllerManager);
 
-PLUGINLIB_EXPORT_CLASS(moveit_ros_control_interface::MoveItMultiControllerManager,
+PLUGINLIB_EXPORT_CLASS(moveit_ros_control_interface::Ros2ControlMultiManager,
                        moveit_controller_manager::MoveItControllerManager);

@@ -34,7 +34,7 @@
 
 /* Author: Suat Gedikli */
 
-#include <moveit/mesh_filter/sensor_model.h>
+#include <moveit/mesh_filter/sensor_model.hpp>
 #include <stdexcept>
 
 mesh_filter::SensorModel::~SensorModel() = default;
@@ -165,9 +165,13 @@ void mesh_filter::SensorModel::Parameters::transformModelDepthToMetricDepth(floa
   while (depth < depth_end)
   {
     if (*depth != 0 && *depth != 1)
+    {
       *depth = nf / (far - *depth * f_n);
+    }
     else
+    {
       *depth = 0;
+    }
 
     ++depth;
   }
@@ -227,9 +231,13 @@ void mesh_filter::SensorModel::Parameters::transformFilteredDepthToMetricDepth(f
     // 0 = on near clipping plane -> we used 0 to mark invalid points -> not visible
     // points on far clipping plane needs to be removed too
     if (*depth != 0 && *depth != 1.0)
+    {
       *depth = *depth * scale + offset;
+    }
     else
+    {
       *depth = 0;
+    }
 
     ++depth;
   }

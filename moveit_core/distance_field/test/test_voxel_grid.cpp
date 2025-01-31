@@ -36,8 +36,8 @@
 
 #include <gtest/gtest.h>
 
-#include <moveit/distance_field/voxel_grid.h>
-#include "rclcpp/rclcpp.hpp"
+#include <moveit/distance_field/voxel_grid.hpp>
+#include <rclcpp/rclcpp.hpp>
 
 using namespace distance_field;
 
@@ -60,13 +60,17 @@ TEST(TestVoxelGrid, TestReadWrite)
   vg.reset(0);
 
   i = 0;
-  for (int x = 0; x < num_x; x++)
-    for (int y = 0; y < num_y; y++)
-      for (int z = 0; z < num_z; z++)
+  for (int x = 0; x < num_x; ++x)
+  {
+    for (int y = 0; y < num_y; ++y)
+    {
+      for (int z = 0; z < num_z; ++z)
       {
         EXPECT_EQ(vg.getCell(x, y, z), 0);
         i++;
       }
+    }
+  }
 
   // Check out-of-bounds query    // FIXME-- this test fails!!
   // EXPECT_EQ( vg.getCell(999,9999,999), def );
@@ -76,23 +80,31 @@ TEST(TestVoxelGrid, TestReadWrite)
 
   // Set values
   i = 0;
-  for (int x = 0; x < num_x; x++)
-    for (int y = 0; y < num_y; y++)
-      for (int z = 0; z < num_z; z++)
+  for (int x = 0; x < num_x; ++x)
+  {
+    for (int y = 0; y < num_y; ++y)
+    {
+      for (int z = 0; z < num_z; ++z)
       {
         vg.getCell(x, y, z) = i;
         i++;
       }
+    }
+  }
 
   // check reset values
   i = 0;
-  for (int x = 0; x < num_x; x++)
-    for (int y = 0; y < num_y; y++)
-      for (int z = 0; z < num_z; z++)
+  for (int x = 0; x < num_x; ++x)
+  {
+    for (int y = 0; y < num_y; ++y)
+    {
+      for (int z = 0; z < num_z; ++z)
       {
         EXPECT_EQ(i, vg.getCell(x, y, z));
         i++;
       }
+    }
+  }
 }
 
 int main(int argc, char** argv)

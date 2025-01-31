@@ -35,25 +35,32 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/robot_model/floating_joint_model.h>
-#include <geometric_shapes/check_isometry.h>
-#include <boost/math/constants/constants.hpp>
-#include <limits>
 #include <cmath>
-#include "rclcpp/rclcpp.hpp"
+#include <Eigen/Geometry>
+#include <geometric_shapes/check_isometry.h>
+#include <limits>
+#include <moveit/robot_model/floating_joint_model.hpp>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <moveit/utils/logger.hpp>
 
 namespace moveit
 {
 namespace core
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_robot_model.floating_joint_model");
 namespace
 {
 constexpr size_t STATE_SPACE_DIMENSION = 7;
 
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.core.floating_joint_model");
+}
+
 }  // namespace
 
-FloatingJointModel::FloatingJointModel(const std::string& name) : JointModel(name), angular_distance_weight_(1.0)
+FloatingJointModel::FloatingJointModel(const std::string& name, size_t joint_index, size_t first_variable_index)
+  : JointModel(name, joint_index, first_variable_index), angular_distance_weight_(1.0)
 {
   type_ = FLOATING;
   local_variable_names_.push_back("trans_x");
@@ -65,7 +72,7 @@ FloatingJointModel::FloatingJointModel(const std::string& name) : JointModel(nam
   local_variable_names_.push_back("rot_w");
   for (size_t i = 0; i < STATE_SPACE_DIMENSION; ++i)
   {
-    variable_names_.push_back(name_ + "/" + local_variable_names_[i]);
+    variable_names_.push_back(getName() + "/" + local_variable_names_[i]);
     variable_index_map_[variable_names_.back()] = i;
   }
 
@@ -102,7 +109,7 @@ double FloatingJointModel::getMaximumExtent(const Bounds& other_bounds) const
   double dx = other_bounds[0].max_position_ - other_bounds[0].min_position_;
   double dy = other_bounds[1].max_position_ - other_bounds[1].min_position_;
   double dz = other_bounds[2].max_position_ - other_bounds[2].min_position_;
-  return sqrt(dx * dx + dy * dy + dz * dz) + boost::math::constants::pi<double>() * 0.5 * angular_distance_weight_;
+  return sqrt(dx * dx + dy * dy + dz * dz) + M_PI * 0.5 * angular_distance_weight_;
 }
 
 double FloatingJointModel::distance(const double* values1, const double* values2) const
@@ -120,12 +127,10 @@ double FloatingJointModel::distanceTranslation(const double* values1, const doub
 
 double FloatingJointModel::distanceRotation(const double* values1, const double* values2) const
 {
-  double dq =
-      fabs(values1[3] * values2[3] + values1[4] * values2[4] + values1[5] * values2[5] + values1[6] * values2[6]);
-  if (dq + std::numeric_limits<double>::epsilon() >= 1.0)
-    return 0.0;
-  else
-    return acos(dq);
+  // The values are in "xyzw" order but Eigen expects "wxyz".
+  const auto q1 = Eigen::Quaterniond(values1[6], values1[3], values1[4], values1[5]).normalized();
+  const auto q2 = Eigen::Quaterniond(values2[6], values2[3], values2[4], values2[5]).normalized();
+  return q2.angularDistance(q1);
 }
 
 void FloatingJointModel::interpolate(const double* from, const double* to, const double t, double* state) const
@@ -135,19 +140,20 @@ void FloatingJointModel::interpolate(const double* from, const double* to, const
   state[1] = from[1] + (to[1] - from[1]) * t;
   state[2] = from[2] + (to[2] - from[2]) * t;
 
-  double dq = fabs(from[3] * to[3] + from[4] * to[4] + from[5] * to[5] + from[6] * to[6]);
-  double theta = (dq + std::numeric_limits<double>::epsilon() >= 1.0) ? 0.0 : acos(dq);
-  if (theta > std::numeric_limits<double>::epsilon())
+  // Check if the quaternions are significantly different
+  if (abs(from[3] - to[3]) + abs(from[4] - to[4]) + abs(from[5] - to[5]) + abs(from[6] - to[6]) >
+      std::numeric_limits<double>::epsilon())
   {
-    double d = 1.0 / sin(theta);
-    double s0 = sin((1.0 - t) * theta);
-    double s1 = sin(t * theta);
-    if (dq < 0)  // Take care of long angle case see http://en.wikipedia.org/wiki/Slerp
-      s1 = -s1;
-    state[3] = (from[3] * s0 + to[3] * s1) * d;
-    state[4] = (from[4] * s0 + to[4] * s1) * d;
-    state[5] = (from[5] * s0 + to[5] * s1) * d;
-    state[6] = (from[6] * s0 + to[6] * s1) * d;
+    // Note the ordering: Eigen takes w first!
+    Eigen::Quaterniond q1(from[6], from[3], from[4], from[5]);
+    Eigen::Quaterniond q2(to[6], to[3], to[4], to[5]);
+
+    Eigen::Quaterniond q = q1.slerp(t, q2);
+
+    state[3] = q.x();
+    state[4] = q.y();
+    state[5] = q.z();
+    state[6] = q.w();
   }
   else
   {
@@ -167,7 +173,7 @@ bool FloatingJointModel::satisfiesPositionBounds(const double* values, const Bou
   if (values[2] < bounds[2].min_position_ - margin || values[2] > bounds[2].max_position_ + margin)
     return false;
   double norm_sqr = values[3] * values[3] + values[4] * values[4] + values[5] * values[5] + values[6] * values[6];
-  return fabs(norm_sqr - 1.0) <= std::numeric_limits<float>::epsilon() * 10.0;
+  return fabs(norm_sqr - 1.0) <= std::numeric_limits<double>::epsilon() * 10.0;
 }
 
 bool FloatingJointModel::normalizeRotation(double* values) const
@@ -179,7 +185,7 @@ bool FloatingJointModel::normalizeRotation(double* values) const
     double norm = sqrt(norm_sqr);
     if (norm < std::numeric_limits<double>::epsilon() * 100.0)
     {
-      RCLCPP_WARN(LOGGER, "Quaternion is zero in RobotState representation. Setting to identity");
+      RCLCPP_WARN(getLogger(), "Quaternion is zero in RobotState representation. Setting to identity");
       values[3] = 0.0;
       values[4] = 0.0;
       values[5] = 0.0;
@@ -248,9 +254,13 @@ void FloatingJointModel::getVariableDefaultPositions(double* values, const Bound
   {
     // if zero is a valid value
     if (bounds[i].min_position_ <= 0.0 && bounds[i].max_position_ >= 0.0)
+    {
       values[i] = 0.0;
+    }
     else
+    {
       values[i] = (bounds[i].min_position_ + bounds[i].max_position_) / 2.0;
+    }
   }
 
   values[3] = 0.0;
@@ -264,19 +274,31 @@ void FloatingJointModel::getVariableRandomPositions(random_numbers::RandomNumber
 {
   if (bounds[0].max_position_ >= std::numeric_limits<double>::infinity() ||
       bounds[0].min_position_ <= -std::numeric_limits<double>::infinity())
+  {
     values[0] = 0.0;
+  }
   else
+  {
     values[0] = rng.uniformReal(bounds[0].min_position_, bounds[0].max_position_);
+  }
   if (bounds[1].max_position_ >= std::numeric_limits<double>::infinity() ||
       bounds[1].min_position_ <= -std::numeric_limits<double>::infinity())
+  {
     values[1] = 0.0;
+  }
   else
+  {
     values[1] = rng.uniformReal(bounds[1].min_position_, bounds[1].max_position_);
+  }
   if (bounds[2].max_position_ >= std::numeric_limits<double>::infinity() ||
       bounds[2].min_position_ <= -std::numeric_limits<double>::infinity())
+  {
     values[2] = 0.0;
+  }
   else
+  {
     values[2] = rng.uniformReal(bounds[2].min_position_, bounds[2].max_position_);
+  }
 
   double q[4];
   rng.quaternion(q);
@@ -292,25 +314,37 @@ void FloatingJointModel::getVariableRandomPositionsNearBy(random_numbers::Random
 {
   if (bounds[0].max_position_ >= std::numeric_limits<double>::infinity() ||
       bounds[0].min_position_ <= -std::numeric_limits<double>::infinity())
+  {
     values[0] = 0.0;
+  }
   else
+  {
     values[0] = rng.uniformReal(std::max(bounds[0].min_position_, near[0] - distance),
                                 std::min(bounds[0].max_position_, near[0] + distance));
+  }
   if (bounds[1].max_position_ >= std::numeric_limits<double>::infinity() ||
       bounds[1].min_position_ <= -std::numeric_limits<double>::infinity())
+  {
     values[1] = 0.0;
+  }
   else
+  {
     values[1] = rng.uniformReal(std::max(bounds[1].min_position_, near[1] - distance),
                                 std::min(bounds[1].max_position_, near[1] + distance));
+  }
   if (bounds[2].max_position_ >= std::numeric_limits<double>::infinity() ||
       bounds[2].min_position_ <= -std::numeric_limits<double>::infinity())
+  {
     values[2] = 0.0;
+  }
   else
+  {
     values[2] = rng.uniformReal(std::max(bounds[2].min_position_, near[2] - distance),
                                 std::min(bounds[2].max_position_, near[2] + distance));
+  }
 
   double da = angular_distance_weight_ * distance;
-  if (da >= .25 * boost::math::constants::pi<double>())
+  if (da >= .25 * M_PI)
   {
     double q[4];
     rng.quaternion(q);

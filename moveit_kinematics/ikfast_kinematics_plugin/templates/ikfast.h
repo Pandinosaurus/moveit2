@@ -32,12 +32,14 @@
    - IKFAST_NAMESPACE - Enclose all functions and classes in this namespace, the ``main`` function is excluded.
 
  */
+
+#pragma once
+
 #include <vector>
 #include <list>
 #include <stdexcept>
 
-#ifndef IKFAST_HEADER_COMMON
-#define IKFAST_HEADER_COMMON
+#pragma once
 
 /// should be the same as ikfast.__version__
 #define IKFAST_VERSION 61
@@ -83,7 +85,7 @@ public:
   virtual void GetSolution(std::vector<T>& solution, const std::vector<T>& freevalues) const
   {
     solution.resize(GetDOF());
-    GetSolution(&solution.at(0), freevalues.size() > 0 ? &freevalues.at(0) : NULL);
+    GetSolution(&solution.at(0), freevalues.size() > 0 ? &freevalues.at(0) : nullptr);
   }
 
   /// \brief Gets the indices of the configuration space that have to be preset before a full solution can be returned
@@ -128,15 +130,15 @@ class IkFastFunctions
 {
 public:
   IkFastFunctions()
-    : _ComputeIk(NULL)
-    , _ComputeFk(NULL)
-    , _GetNumFreeParameters(NULL)
-    , _GetFreeParameters(NULL)
-    , _GetNumJoints(NULL)
-    , _GetIkRealSize(NULL)
-    , _GetIkFastVersion(NULL)
-    , _GetIkType(NULL)
-    , _GetKinematicsHash(NULL)
+    : _ComputeIk(nullptr)
+    , _ComputeFk(nullptr)
+    , _GetNumFreeParameters(nullptr)
+    , _GetFreeParameters(nullptr)
+    , _GetNumJoints(nullptr)
+    , _GetIkRealSize(nullptr)
+    , _GetIkFastVersion(nullptr)
+    , _GetIkType(nullptr)
+    , _GetKinematicsHash(nullptr)
   {
   }
   virtual ~IkFastFunctions()
@@ -199,7 +201,7 @@ public:
   virtual void GetSolution(std::vector<T>& solution, const std::vector<T>& freevalues) const
   {
     solution.resize(GetDOF());
-    GetSolution(&solution.at(0), freevalues.size() > 0 ? &freevalues.at(0) : NULL);
+    GetSolution(&solution.at(0), freevalues.size() > 0 ? &freevalues.at(0) : nullptr);
   }
 
   virtual const std::vector<int>& GetFree() const
@@ -215,7 +217,7 @@ public:
   {
     for (size_t i = 0; i < _vbasesol.size(); ++i)
     {
-      if (_vbasesol[i].maxsolutions == (unsigned char)-1)
+      if (_vbasesol[i].maxsolutions == static_cast<unsigned char>(-1))
       {
         throw std::runtime_error("max solutions for joint not initialized");
       }
@@ -225,7 +227,8 @@ public:
         {
           throw std::runtime_error("index >= max solutions for joint");
         }
-        if (_vbasesol[i].indices[1] != (unsigned char)-1 && _vbasesol[i].indices[1] >= _vbasesol[i].maxsolutions)
+        if (_vbasesol[i].indices[1] != static_cast<unsigned char>(-1) &&
+            _vbasesol[i].indices[1] >= _vbasesol[i].maxsolutions)
         {
           throw std::runtime_error("2nd index >= max solutions for joint");
         }
@@ -237,23 +240,23 @@ public:
   {
     v.resize(0);
     v.push_back(0);
-    for (int i = (int)_vbasesol.size() - 1; i >= 0; --i)
+    for (int i = static_cast<int>(_vbasesol.size()) - 1; i >= 0; --i)
     {
-      if (_vbasesol[i].maxsolutions != (unsigned char)-1 && _vbasesol[i].maxsolutions > 1)
+      if (_vbasesol[i].maxsolutions != static_cast<unsigned char>(-1) && _vbasesol[i].maxsolutions > 1)
       {
         for (size_t j = 0; j < v.size(); ++j)
         {
           v[j] *= _vbasesol[i].maxsolutions;
         }
         size_t orgsize = v.size();
-        if (_vbasesol[i].indices[1] != (unsigned char)-1)
+        if (_vbasesol[i].indices[1] != static_cast<unsigned char>(-1))
         {
           for (size_t j = 0; j < orgsize; ++j)
           {
             v.push_back(v[j] + _vbasesol[i].indices[1]);
           }
         }
-        if (_vbasesol[i].indices[0] != (unsigned char)-1)
+        if (_vbasesol[i].indices[0] != static_cast<unsigned char>(-1))
         {
           for (size_t j = 0; j < orgsize; ++j)
           {
@@ -264,7 +267,7 @@ public:
     }
   }
 
-  std::vector<IkSingleDOFSolutionBase<T> > _vbasesol;  ///< solution and their offsets if joints are mimiced
+  std::vector<IkSingleDOFSolutionBase<T> > _vbasesol;  ///< solution and their offsets if joints are mimicked
   std::vector<int> _vfree;
 };
 
@@ -305,8 +308,6 @@ protected:
   std::list<IkSolution<T> > _listsolutions;
 };
 }  // namespace ikfast
-
-#endif  // OPENRAVE_IKFAST_HEADER
 
 // The following code is dependent on the C++ library linking with.
 #ifdef IKFAST_HAS_LIBRARY

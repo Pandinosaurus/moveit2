@@ -33,12 +33,12 @@
  *********************************************************************/
 
 /* Author: Ioan Sucan, Mario Prats */
-#include <moveit/warehouse/planning_scene_storage.h>
+#include <moveit/warehouse/planning_scene_storage.hpp>
 
-#include <moveit/motion_planning_rviz_plugin/motion_planning_frame.h>
-#include <moveit/motion_planning_rviz_plugin/motion_planning_display.h>
-#include <moveit/robot_state/conversions.h>
-#include <moveit/robot_interaction/interactive_marker_helpers.h>
+#include <moveit/motion_planning_rviz_plugin/motion_planning_frame.hpp>
+#include <moveit/motion_planning_rviz_plugin/motion_planning_display.hpp>
+#include <moveit/robot_state/conversions.hpp>
+#include <moveit/robot_interaction/interactive_marker_helpers.hpp>
 
 #include <interactive_markers/tools.hpp>
 
@@ -46,7 +46,7 @@
 #include <rviz_common/frame_manager_iface.hpp>
 #include <rviz_common/window_manager_interface.hpp>
 
-#include <tf2_eigen/tf2_eigen.h>
+#include <tf2_eigen/tf2_eigen.hpp>
 #include <geometric_shapes/shape_operations.h>
 
 #include <QMessageBox>
@@ -57,7 +57,7 @@
 
 namespace
 {
-QString subframe_poses_to_qstring(const moveit::core::FixedTransformsMap& subframes)
+QString subframePosesToQstring(const moveit::core::FixedTransformsMap& subframes)
 {
   QString status_text = "\nIt has the subframes '";
   for (const auto& subframe : subframes)
@@ -72,7 +72,6 @@ QString subframe_poses_to_qstring(const moveit::core::FixedTransformsMap& subfra
 
 namespace moveit_rviz_plugin
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_ros_visualization.motion_planning_frame_objects");
 
 void MotionPlanningFrame::shapesComboBoxChanged(const QString& /*text*/)
 {
@@ -147,13 +146,14 @@ void MotionPlanningFrame::clearScene()
     ps->getPlanningSceneMsg(msg);
     planning_scene_publisher_->publish(msg);
     setLocalSceneEdited(false);
-    planning_display_->addMainLoopJob(boost::bind(&MotionPlanningFrame::populateCollisionObjectsList, this));
+    planning_display_->addMainLoopJob([this] { populateCollisionObjectsList(); });
     planning_display_->queueRenderSceneGeometry();
   }
 }
 
 void MotionPlanningFrame::sceneScaleChanged(int value)
 {
+  const double scaling_factor = static_cast<double>(value) / 100.0;  // The GUI slider gives percent values
   if (scaled_object_)
   {
     planning_scene_monitor::LockedPlanningSceneRW ps = planning_display_->getPlanningSceneRW();
@@ -161,17 +161,23 @@ void MotionPlanningFrame::sceneScaleChanged(int value)
     {
       if (ps->getWorld()->hasObject(scaled_object_->id_))
       {
-        const moveit::core::FixedTransformsMap subframes = scaled_object_->subframe_poses_;  // Keep subframes
         ps->getWorldNonConst()->removeObject(scaled_object_->id_);
         for (std::size_t i = 0; i < scaled_object_->shapes_.size(); ++i)
         {
           shapes::Shape* s = scaled_object_->shapes_[i]->clone();
-          s->scale((double)value / 100.0);
-          ps->getWorldNonConst()->addToObject(scaled_object_->id_, shapes::ShapeConstPtr(s),
-                                              scaled_object_->shape_poses_[i]);
+          s->scale(scaling_factor);
+
+          Eigen::Isometry3d scaled_shape_pose = scaled_object_->shape_poses_[i];
+          scaled_shape_pose.translation() *= scaling_factor;
+
+          ps->getWorldNonConst()->addToObject(scaled_object_->id_, scaled_object_->pose_, shapes::ShapeConstPtr(s),
+                                              scaled_shape_pose);
         }
-        // TODO(felixvd): Scale subframes too
-        ps->getWorldNonConst()->setSubframesOfObject(scaled_object_->id_, subframes);
+        moveit::core::FixedTransformsMap scaled_subframes = scaled_object_->subframe_poses_;
+        for (auto& subframe_pair : scaled_subframes)
+          subframe_pair.second.translation() *= scaling_factor;
+
+        ps->getWorldNonConst()->setSubframesOfObject(scaled_object_->id_, scaled_subframes);
         setLocalSceneEdited();
         scene_marker_->processMessage(createObjectMarkerMsg(ps->getWorld()->getObject(scaled_object_->id_)));
         planning_display_->queueRenderSceneGeometry();
@@ -195,6 +201,8 @@ void MotionPlanningFrame::sceneScaleStartChange()
     if (ps)
     {
       scaled_object_ = ps->getWorld()->getObject(sel[0]->text().toStdString());
+      scaled_object_subframes_ = scaled_object_->subframe_poses_;
+      scaled_object_shape_poses_ = scaled_object_->shape_poses_;
     }
   }
 }
@@ -214,13 +222,19 @@ void MotionPlanningFrame::removeSceneObject()
   if (ps)
   {
     for (int i = 0; i < sel.count(); ++i)
+    {
       if (sel[i]->checkState() == Qt::Unchecked)
+      {
         ps->getWorldNonConst()->removeObject(sel[i]->text().toStdString());
+      }
       else
+      {
         ps->getCurrentStateNonConst().clearAttachedBody(sel[i]->text().toStdString());
+      }
+    }
     scene_marker_.reset();
     setLocalSceneEdited();
-    planning_display_->addMainLoopJob(boost::bind(&MotionPlanningFrame::populateCollisionObjectsList, this));
+    planning_display_->addMainLoopJob([this] { populateCollisionObjectsList(); });
     planning_display_->queueRenderSceneGeometry();
   }
 }
@@ -229,14 +243,18 @@ static QString decideStatusText(const collision_detection::CollisionEnv::ObjectC
 {
   QString status_text = "'" + QString::fromStdString(obj->id_) + "' is a collision object with ";
   if (obj->shapes_.empty())
+  {
     status_text += "no geometry";
+  }
   else
   {
     std::vector<QString> shape_names;
     for (const shapes::ShapeConstPtr& shape : obj->shapes_)
       shape_names.push_back(QString::fromStdString(shapes::shapeStringName(shape.get())));
     if (shape_names.size() == 1)
+    {
       status_text += "one " + shape_names[0];
+    }
     else
     {
       status_text += QString::fromStdString(std::to_string(shape_names.size())) + " shapes:";
@@ -247,7 +265,7 @@ static QString decideStatusText(const collision_detection::CollisionEnv::ObjectC
   }
   if (!obj->subframe_poses_.empty())
   {
-    status_text += subframe_poses_to_qstring(obj->subframe_poses_);
+    status_text += subframePosesToQstring(obj->subframe_poses_);
   }
   return status_text;
 }
@@ -256,9 +274,9 @@ static QString decideStatusText(const moveit::core::AttachedBody* attached_body)
 {
   QString status_text = "'" + QString::fromStdString(attached_body->getName()) + "' is attached to '" +
                         QString::fromStdString(attached_body->getAttachedLinkName()) + "'.";
-  if (!attached_body->getSubframeTransforms().empty())
+  if (!attached_body->getSubframes().empty())
   {
-    status_text += subframe_poses_to_qstring(attached_body->getSubframeTransforms());
+    status_text += subframePosesToQstring(attached_body->getSubframes());
   }
   return status_text;
 }
@@ -314,7 +332,7 @@ void MotionPlanningFrame::selectedCollisionObjectChanged()
 
           if (obj->shapes_.size() == 1)
           {
-            obj_pose = obj->shape_poses_[0];  // valid isometry by contract
+            obj_pose = obj->pose_;  // valid isometry by contract
             Eigen::Vector3d xyz = obj_pose.linear().eulerAngles(0, 1, 2);
             update_scene_marker = true;  // do the marker update outside locked scope to avoid deadlock
 
@@ -360,9 +378,13 @@ void MotionPlanningFrame::selectedCollisionObjectChanged()
       const moveit::core::AttachedBody* attached_body =
           ps->getCurrentState().getAttachedBody(sel[0]->text().toStdString());
       if (attached_body)
+      {
         ui_->object_status->setText(decideStatusText(attached_body));
+      }
       else
+      {
         ui_->object_status->setText("ERROR: '" + sel[0]->text() + "' should be an attached object but it is not");
+      }
     }
   }
 }
@@ -381,7 +403,7 @@ void MotionPlanningFrame::updateCollisionObjectPose(bool update_marker_position)
   if (ps)
   {
     collision_detection::CollisionEnv::ObjectConstPtr obj = ps->getWorld()->getObject(sel[0]->text().toStdString());
-    if (obj && obj->shapes_.size() == 1)
+    if (obj)
     {
       Eigen::Isometry3d p;
       p.translation()[0] = ui_->object_x->value();
@@ -393,7 +415,7 @@ void MotionPlanningFrame::updateCollisionObjectPose(bool update_marker_position)
            Eigen::AngleAxisd(ui_->object_ry->value(), Eigen::Vector3d::UnitY()) *
            Eigen::AngleAxisd(ui_->object_rz->value(), Eigen::Vector3d::UnitZ()));
 
-      ps->getWorldNonConst()->moveShapeInObject(obj->id_, obj->shapes_[0], p);
+      ps->getWorldNonConst()->setObjectPose(obj->id_, p);
       planning_display_->queueRenderSceneGeometry();
       setLocalSceneEdited();
 
@@ -411,11 +433,13 @@ void MotionPlanningFrame::updateCollisionObjectPose(bool update_marker_position)
 
 void MotionPlanningFrame::collisionObjectChanged(QListWidgetItem* item)
 {
-  if (item->type() < (int)known_collision_objects_.size() && planning_display_->getPlanningSceneMonitor())
+  if (item->type() < static_cast<int>(known_collision_objects_.size()) && planning_display_->getPlanningSceneMonitor())
   {
     // if we have a name change
     if (known_collision_objects_[item->type()].first != item->text().toStdString())
+    {
       renameCollisionObject(item);
+    }
     else
     {
       bool checked = item->checkState() == Qt::Checked;
@@ -428,21 +452,29 @@ void MotionPlanningFrame::collisionObjectChanged(QListWidgetItem* item)
 /* Receives feedback from the interactive marker and updates the shape pose in the world accordingly */
 void MotionPlanningFrame::imProcessFeedback(visualization_msgs::msg::InteractiveMarkerFeedback& feedback)
 {
+  if (!planning_display_->getPlanningSceneRO()->knowsFrameTransform(feedback.header.frame_id))
+  {
+    RCLCPP_ERROR_STREAM(logger_,
+                        "Frame `" << feedback.header.frame_id << "` unknown doesn't exists in the planning scene");
+  }
+  Eigen::Isometry3d fixed_frame_t_scene_marker;
+  tf2::fromMsg(feedback.pose, fixed_frame_t_scene_marker);
+  Eigen::Isometry3d model_frame_t_scene_marker =
+      planning_display_->getPlanningSceneRO()->getFrameTransform(feedback.header.frame_id) * fixed_frame_t_scene_marker;
+
   bool old_state = ui_->object_x->blockSignals(true);
-  ui_->object_x->setValue(feedback.pose.position.x);
+  ui_->object_x->setValue(model_frame_t_scene_marker.translation().x());
   ui_->object_x->blockSignals(old_state);
 
   old_state = ui_->object_y->blockSignals(true);
-  ui_->object_y->setValue(feedback.pose.position.y);
+  ui_->object_y->setValue(model_frame_t_scene_marker.translation().y());
   ui_->object_y->blockSignals(old_state);
 
   old_state = ui_->object_z->blockSignals(true);
-  ui_->object_z->setValue(feedback.pose.position.z);
+  ui_->object_z->setValue(model_frame_t_scene_marker.translation().z());
   ui_->object_z->blockSignals(old_state);
 
-  Eigen::Quaterniond q;
-  tf2::fromMsg(feedback.pose.orientation, q);
-  Eigen::Vector3d xyz = q.matrix().eulerAngles(0, 1, 2);
+  Eigen::Vector3d xyz = model_frame_t_scene_marker.linear().eulerAngles(0, 1, 2);
 
   old_state = ui_->object_rx->blockSignals(true);
   ui_->object_rx->setValue(xyz[0]);
@@ -477,7 +509,7 @@ void MotionPlanningFrame::copySelectedCollisionObject()
       continue;
 
     // find a name for the copy
-    name = std::string("Copy of ").append(name);
+    name.insert(0, "Copy of ");
     if (ps->getWorld()->hasObject(name))
     {
       name += " ";
@@ -487,10 +519,10 @@ void MotionPlanningFrame::copySelectedCollisionObject()
       name += std::to_string(n);
     }
     ps->getWorldNonConst()->addToObject(name, obj->shapes_, obj->shape_poses_);
-    RCLCPP_DEBUG(LOGGER, "Copied collision object to '%s'", name.c_str());
+    RCLCPP_DEBUG(logger_, "Copied collision object to '%s'", name.c_str());
   }
   setLocalSceneEdited();
-  planning_display_->addMainLoopJob(boost::bind(&MotionPlanningFrame::populateCollisionObjectsList, this));
+  planning_display_->addMainLoopJob([this] { populateCollisionObjectsList(); });
 }
 
 void MotionPlanningFrame::computeSaveSceneButtonClicked()
@@ -506,10 +538,10 @@ void MotionPlanningFrame::computeSaveSceneButtonClicked()
     }
     catch (std::exception& ex)
     {
-      RCLCPP_ERROR(LOGGER, "%s", ex.what());
+      RCLCPP_ERROR(logger_, "%s", ex.what());
     }
 
-    planning_display_->addMainLoopJob(boost::bind(&MotionPlanningFrame::populatePlanningSceneTreeView, this));
+    planning_display_->addMainLoopJob([this] { populatePlanningSceneTreeView(); });
   }
 }
 
@@ -527,10 +559,10 @@ void MotionPlanningFrame::computeSaveQueryButtonClicked(const std::string& scene
     }
     catch (std::exception& ex)
     {
-      RCLCPP_ERROR(LOGGER, "%s", ex.what());
+      RCLCPP_ERROR(logger_, "%s", ex.what());
     }
 
-    planning_display_->addMainLoopJob(boost::bind(&MotionPlanningFrame::populatePlanningSceneTreeView, this));
+    planning_display_->addMainLoopJob([this] { populatePlanningSceneTreeView(); });
   }
 }
 
@@ -551,7 +583,7 @@ void MotionPlanningFrame::computeDeleteSceneButtonClicked()
         }
         catch (std::exception& ex)
         {
-          RCLCPP_ERROR(LOGGER, "%s", ex.what());
+          RCLCPP_ERROR(logger_, "%s", ex.what());
         }
       }
       else
@@ -564,10 +596,10 @@ void MotionPlanningFrame::computeDeleteSceneButtonClicked()
         }
         catch (std::exception& ex)
         {
-          RCLCPP_ERROR(LOGGER, "%s", ex.what());
+          RCLCPP_ERROR(logger_, "%s", ex.what());
         }
       }
-      planning_display_->addMainLoopJob(boost::bind(&MotionPlanningFrame::populatePlanningSceneTreeView, this));
+      planning_display_->addMainLoopJob([this] { populatePlanningSceneTreeView(); });
     }
   }
 }
@@ -590,10 +622,9 @@ void MotionPlanningFrame::computeDeleteQueryButtonClicked()
         }
         catch (std::exception& ex)
         {
-          RCLCPP_ERROR(LOGGER, "%s", ex.what());
+          RCLCPP_ERROR(logger_, "%s", ex.what());
         }
-        planning_display_->addMainLoopJob(
-            boost::bind(&MotionPlanningFrame::computeDeleteQueryButtonClickedHelper, this, s));
+        planning_display_->addMainLoopJob([this, s] { computeDeleteQueryButtonClickedHelper(s); });
       }
     }
   }
@@ -653,7 +684,7 @@ void MotionPlanningFrame::computeLoadSceneButtonClicked()
       if (s->type() == ITEM_TYPE_SCENE)
       {
         std::string scene = s->text(0).toStdString();
-        RCLCPP_DEBUG(LOGGER, "Attempting to load scene '%s'", scene.c_str());
+        RCLCPP_DEBUG(logger_, "Attempting to load scene '%s'", scene.c_str());
 
         moveit_warehouse::PlanningSceneWithMetadata scene_m;
         bool got_ps = false;
@@ -663,17 +694,17 @@ void MotionPlanningFrame::computeLoadSceneButtonClicked()
         }
         catch (std::exception& ex)
         {
-          RCLCPP_ERROR(LOGGER, "%s", ex.what());
+          RCLCPP_ERROR(logger_, "%s", ex.what());
         }
 
         if (got_ps)
         {
-          RCLCPP_INFO(LOGGER, "Loaded scene '%s'", scene.c_str());
+          RCLCPP_INFO(logger_, "Loaded scene '%s'", scene.c_str());
           if (planning_display_->getPlanningSceneMonitor())
           {
             if (scene_m->robot_model_name != planning_display_->getRobotModel()->getName())
             {
-              RCLCPP_INFO(LOGGER,
+              RCLCPP_INFO(logger_,
                           "Scene '%s' was saved for robot '%s' but we are using robot '%s'. Using scene geometry only",
                           scene.c_str(), scene_m->robot_model_name.c_str(),
                           planning_display_->getRobotModel()->getName().c_str());
@@ -691,8 +722,10 @@ void MotionPlanningFrame::computeLoadSceneButtonClicked()
             planning_scene_publisher_->publish(static_cast<const moveit_msgs::msg::PlanningScene&>(*scene_m));
         }
         else
-          RCLCPP_WARN(LOGGER, "Failed to load scene '%s'. Has the message format changed since the scene was saved?",
+        {
+          RCLCPP_WARN(logger_, "Failed to load scene '%s'. Has the message format changed since the scene was saved?",
                       scene.c_str());
+        }
       }
     }
   }
@@ -719,7 +752,7 @@ void MotionPlanningFrame::computeLoadQueryButtonClicked()
         }
         catch (std::exception& ex)
         {
-          RCLCPP_ERROR(LOGGER, "%s", ex.what());
+          RCLCPP_ERROR(logger_, "%s", ex.what());
         }
 
         if (got_q)
@@ -730,8 +763,9 @@ void MotionPlanningFrame::computeLoadQueryButtonClicked()
                                                   mp->start_state, *start_state);
           planning_display_->setQueryStartState(*start_state);
 
-          moveit::core::RobotStatePtr goal_state(new moveit::core::RobotState(*planning_display_->getQueryGoalState()));
+          auto goal_state = std::make_shared<moveit::core::RobotState>(*planning_display_->getQueryGoalState());
           for (const moveit_msgs::msg::Constraints& goal_constraint : mp->goal_constraints)
+          {
             if (!goal_constraint.joint_constraints.empty())
             {
               std::map<std::string, double> vals;
@@ -740,12 +774,15 @@ void MotionPlanningFrame::computeLoadQueryButtonClicked()
               goal_state->setVariablePositions(vals);
               break;
             }
+          }
           planning_display_->setQueryGoalState(*goal_state);
         }
         else
-          RCLCPP_ERROR(LOGGER,
+        {
+          RCLCPP_ERROR(logger_,
                        "Failed to load planning query '%s'. Has the message format changed since the query was saved?",
                        query_name.c_str());
+        }
       }
     }
   }
@@ -758,7 +795,11 @@ MotionPlanningFrame::createObjectMarkerMsg(const collision_detection::CollisionE
   double scale;
   shapes::computeShapeBoundingSphere(obj->shapes_[0].get(), center, scale);
   geometry_msgs::msg::PoseStamped shape_pose = tf2::toMsg(tf2::Stamped<Eigen::Isometry3d>(
-      obj->shape_poses_[0], std::chrono::system_clock::now(), planning_display_->getRobotModel()->getModelFrame()));
+      obj->pose_, std::chrono::system_clock::now(), planning_display_->getRobotModel()->getModelFrame()));
+  // TODO(felixvd): Consider where to place the object marker.
+  //                obj->pose*obj->shape_poses_[0] is backwards compatible, sits on the visible part of
+  //                the object, and is more difficult to implement now.
+  //                obj->pose is easier to implement and makes more sense.
   scale = (scale + center.cwiseAbs().maxCoeff()) * 2.0 * 1.2;  // add padding of 20% size
 
   // create an interactive marker msg for the given shape
@@ -833,15 +874,14 @@ void MotionPlanningFrame::renameCollisionObject(QListWidgetItem* item)
     if (obj)
     {
       known_collision_objects_[item->type()].first = item_text;
-      const moveit::core::FixedTransformsMap subframes = obj->subframe_poses_;  // Keep subframes
-      // TODO(felixvd): Scale the subframes with the object
       ps->getWorldNonConst()->removeObject(obj->id_);
-      ps->getWorldNonConst()->addToObject(known_collision_objects_[item->type()].first, obj->shapes_, obj->shape_poses_);
-      ps->getWorldNonConst()->setSubframesOfObject(obj->id_, subframes);
+      ps->getWorldNonConst()->addToObject(known_collision_objects_[item->type()].first, obj->pose_, obj->shapes_,
+                                          obj->shape_poses_);
+      ps->getWorldNonConst()->setSubframesOfObject(obj->id_, obj->subframe_poses_);
       if (scene_marker_)
       {
         scene_marker_.reset();
-        planning_display_->addMainLoopJob(boost::bind(&MotionPlanningFrame::createSceneInteractiveMarker, this));
+        planning_display_->addMainLoopJob([this] { createSceneInteractiveMarker(); });
       }
     }
   }
@@ -854,12 +894,11 @@ void MotionPlanningFrame::renameCollisionObject(QListWidgetItem* item)
     if (ab)
     {
       known_collision_objects_[item->type()].first = item_text;
-      moveit::core::AttachedBody* new_ab =
-          new moveit::core::AttachedBody(ab->getAttachedLink(), known_collision_objects_[item->type()].first,
-                                         ab->getShapes(), ab->getFixedTransforms(), ab->getTouchLinks(),
-                                         ab->getDetachPosture(), ab->getSubframeTransforms());
+      auto new_ab = std::make_unique<moveit::core::AttachedBody>(
+          ab->getAttachedLink(), known_collision_objects_[item->type()].first, ab->getPose(), ab->getShapes(),
+          ab->getShapePoses(), ab->getTouchLinks(), ab->getDetachPosture(), ab->getSubframes());
       cs.clearAttachedBody(ab->getName());
-      cs.attachBody(new_ab);
+      cs.attachBody(std::move(new_ab));
     }
   }
   setLocalSceneEdited();
@@ -908,11 +947,13 @@ void MotionPlanningFrame::attachDetachCollisionObject(QListWidgetItem* item)
     planning_scene_monitor::LockedPlanningSceneRW ps = planning_display_->getPlanningSceneRW();
     // we loop through the list in case updates were received since the start of the function
     for (std::pair<std::string, bool>& known_collision_object : known_collision_objects_)
+    {
       if (known_collision_object.first == data.first)
       {
         known_collision_object.second = checked;
         break;
       }
+    }
     ps->processAttachedCollisionObjectMsg(aco);
     rs = ps->getCurrentState();
   }
@@ -950,8 +991,8 @@ void MotionPlanningFrame::populateCollisionObjectsList()
           continue;
         }
 
-        QListWidgetItem* item =
-            new QListWidgetItem(QString::fromStdString(collision_object_names[i]), ui_->collision_objects_list, (int)i);
+        QListWidgetItem* item = new QListWidgetItem(QString::fromStdString(collision_object_names[i]),
+                                                    ui_->collision_objects_list, static_cast<int>(i));
         item->setFlags(item->flags() | Qt::ItemIsEditable);
         item->setToolTip(item->text());
         item->setCheckState(Qt::Unchecked);
@@ -968,7 +1009,7 @@ void MotionPlanningFrame::populateCollisionObjectsList()
       {
         QListWidgetItem* item =
             new QListWidgetItem(QString::fromStdString(attached_bodies[i]->getName()), ui_->collision_objects_list,
-                                (int)(i + collision_object_names.size()));
+                                static_cast<int>(i + collision_object_names.size()));
         item->setFlags(item->flags() | Qt::ItemIsEditable);
         item->setToolTip(item->text());
         item->setCheckState(Qt::Checked);
@@ -991,8 +1032,10 @@ void MotionPlanningFrame::exportGeometryAsTextButtonClicked()
   QString path =
       QFileDialog::getSaveFileName(this, tr("Export Scene Geometry"), tr(""), tr("Scene Geometry (*.scene)"));
   if (!path.isEmpty())
-    planning_display_->addBackgroundJob(
-        boost::bind(&MotionPlanningFrame::computeExportGeometryAsText, this, path.toStdString()), "export as text");
+  {
+    planning_display_->addBackgroundJob([this, path = path.toStdString()] { computeExportGeometryAsText(path); },
+                                        "export as text");
+  }
 }
 
 void MotionPlanningFrame::computeExportGeometryAsText(const std::string& path)
@@ -1006,10 +1049,10 @@ void MotionPlanningFrame::computeExportGeometryAsText(const std::string& path)
     {
       ps->saveGeometryToStream(fout);
       fout.close();
-      RCLCPP_INFO(LOGGER, "Saved current scene geometry to '%s'", p.c_str());
+      RCLCPP_INFO(logger_, "Saved current scene geometry to '%s'", p.c_str());
     }
     else
-      RCLCPP_WARN(LOGGER, "Unable to save current scene geometry to '%s'", p.c_str());
+      RCLCPP_WARN(logger_, "Unable to save current scene geometry to '%s'", p.c_str());
   }
 }
 
@@ -1021,8 +1064,8 @@ void MotionPlanningFrame::computeImportGeometryFromText(const std::string& path)
     std::ifstream fin(path.c_str());
     if (ps->loadGeometryFromStream(fin))
     {
-      RCLCPP_INFO(LOGGER, "Loaded scene geometry from '%s'", path.c_str());
-      planning_display_->addMainLoopJob(boost::bind(&MotionPlanningFrame::populateCollisionObjectsList, this));
+      RCLCPP_INFO(logger_, "Loaded scene geometry from '%s'", path.c_str());
+      planning_display_->addMainLoopJob([this] { populateCollisionObjectsList(); });
       planning_display_->queueRenderSceneGeometry();
       setLocalSceneEdited();
     }
@@ -1040,7 +1083,9 @@ void MotionPlanningFrame::importGeometryFromTextButtonClicked()
   QString path =
       QFileDialog::getOpenFileName(this, tr("Import Scene Geometry"), tr(""), tr("Scene Geometry (*.scene)"));
   if (!path.isEmpty())
-    planning_display_->addBackgroundJob(
-        boost::bind(&MotionPlanningFrame::computeImportGeometryFromText, this, path.toStdString()), "import from text");
+  {
+    planning_display_->addBackgroundJob([this, path = path.toStdString()] { computeImportGeometryFromText(path); },
+                                        "import from text");
+  }
 }
 }  // namespace moveit_rviz_plugin

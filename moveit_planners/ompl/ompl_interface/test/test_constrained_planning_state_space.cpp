@@ -45,21 +45,24 @@
 #include <gtest/gtest.h>
 #include <Eigen/Dense>
 
-#include <moveit/robot_model/robot_model.h>
-#include <moveit/robot_state/robot_state.h>
-#include <moveit/robot_state/conversions.h>
-#include <moveit/utils/robot_model_test_utils.h>
-#include <moveit/ompl_interface/parameterization/joint_space/constrained_planning_state_space.h>
+#include <moveit/robot_model/robot_model.hpp>
+#include <moveit/robot_state/robot_state.hpp>
+#include <moveit/robot_state/conversions.hpp>
+#include <moveit/utils/robot_model_test_utils.hpp>
+#include <moveit/ompl_interface/parameterization/joint_space/constrained_planning_state_space.hpp>
 #include <moveit_msgs/msg/constraints.hpp>
+#include <moveit/utils/logger.hpp>
 
 #include <ompl/util/Exception.h>
 #include <ompl/base/spaces/RealVectorStateSpace.h>
 #include <ompl/base/spaces/constraint/ProjectedStateSpace.h>
 
-#include "load_test_robot.h"
+#include "load_test_robot.hpp"
 
-static const rclcpp::Logger LOGGER =
-    rclcpp::get_logger("moveit.ompl_planning.test.test_constrained_planning_state_space");
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.planners.ompl.test_constrained_planning_state_space");
+}
 
 /** \brief Dummy constraint for testing, always satisfied. We need this to create and OMPL ConstrainedStateSpace. **/
 class DummyConstraint : public ompl::base::Constraint
@@ -74,7 +77,7 @@ public:
   }
 };
 
-/** \brief Robot indepentent implementation of the tests.  **/
+/** \brief Robot independent implementation of the tests.  **/
 class TestConstrainedStateSpace : public ompl_interface_testing::LoadTestRobot, public testing::Test
 {
 protected:
@@ -118,7 +121,7 @@ protected:
     double* out_joint_positions = dynamic_cast<ompl_interface::ModelBasedStateSpace::StateType*>(state_ptr)->values;
     EXPECT_FALSE(out_joint_positions == nullptr);
 
-    for (std::size_t i = 0; i < num_dofs_; i++)
+    for (std::size_t i = 0; i < num_dofs_; ++i)
     {
       *(out_joint_positions + i) = joint_positions[i];
     }
@@ -127,7 +130,7 @@ protected:
     // it can only be called with an already unwrapped state,
     // this unwrapping is either done in the constrained_state_space_ (see WrapperStateSpace in OMPL),
     // or in copyJointToOMPLState in the implementation of ConstrainedPlanningStateSpace in MoveIt.
-    for (std::size_t i = 0; i < num_dofs_; i++)
+    for (std::size_t i = 0; i < num_dofs_; ++i)
     {
       EXPECT_EQ(joint_positions[i], *(constrained_state_space_->getValueAddressAtIndex(ompl_state.get(), i)));
     }
@@ -147,7 +150,7 @@ protected:
     double* out_joint_positions = dynamic_cast<ompl_interface::ModelBasedStateSpace::StateType*>(state_ptr)->values;
     EXPECT_FALSE(out_joint_positions == nullptr);
 
-    for (std::size_t i = 0; i < num_dofs_; i++)
+    for (std::size_t i = 0; i < num_dofs_; ++i)
     {
       *(out_joint_positions + i) = joint_positions[i];
     }
@@ -163,7 +166,7 @@ protected:
 
     EXPECT_EQ(joint_positions.size(), out_joint_position.size());
 
-    for (std::size_t i = 0; i < num_dofs_; i++)
+    for (std::size_t i = 0; i < num_dofs_; ++i)
     {
       EXPECT_EQ(joint_positions[i], out_joint_position[i]);
     }
@@ -189,7 +192,7 @@ protected:
     double* out_joint_positions = dynamic_cast<ompl_interface::ModelBasedStateSpace::StateType*>(state_ptr)->values;
     EXPECT_FALSE(out_joint_positions == nullptr);
 
-    for (std::size_t i = 0; i < num_dofs_; i++)
+    for (std::size_t i = 0; i < num_dofs_; ++i)
     {
       EXPECT_EQ(joint_positions[i], *(out_joint_positions + i));
     }
@@ -210,14 +213,14 @@ protected:
     ompl::base::ScopedState<> ompl_state(constrained_state_space_);
     auto joint_model_names = joint_model_group_->getActiveJointModelNames();
 
-    for (std::size_t joint_index = 0; joint_index < num_dofs_; joint_index++)
+    for (std::size_t joint_index = 0; joint_index < num_dofs_; ++joint_index)
     {
       const moveit::core::JointModel* joint_model = joint_model_group_->getJointModel(joint_model_names[joint_index]);
       EXPECT_FALSE(joint_model == nullptr);
 
-      RCLCPP_DEBUG_STREAM(LOGGER, "Joint model: " << joint_model->getName() << " index: " << joint_index);
-      RCLCPP_DEBUG_STREAM(LOGGER, "first index: " << joint_model->getFirstVariableIndex() * sizeof(double));
-      RCLCPP_DEBUG_STREAM(LOGGER, "width: " << joint_model->getVariableCount() * sizeof(double));
+      RCLCPP_DEBUG_STREAM(getLogger(), "Joint model: " << joint_model->getName() << " index: " << joint_index);
+      RCLCPP_DEBUG_STREAM(getLogger(), "first index: " << joint_model->getFirstVariableIndex() * sizeof(double));
+      RCLCPP_DEBUG_STREAM(getLogger(), "width: " << joint_model->getVariableCount() * sizeof(double));
 
       moveit_state_space_->copyJointToOMPLState(ompl_state.get(), moveit_state, joint_model, joint_index);
     }
@@ -227,7 +230,7 @@ protected:
     double* out_joint_positions = dynamic_cast<ompl_interface::ModelBasedStateSpace::StateType*>(state_ptr)->values;
     EXPECT_FALSE(out_joint_positions == nullptr);
 
-    for (std::size_t i = 0; i < num_dofs_; i++)
+    for (std::size_t i = 0; i < num_dofs_; ++i)
     {
       EXPECT_EQ(joint_positions[i], *(out_joint_positions + i));
     }

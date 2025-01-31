@@ -34,32 +34,33 @@
 
 /* Author: Ioan Sucan */
 
-#include "state_validation_service_capability.h"
-#include <moveit/robot_state/conversions.h>
-#include <moveit/utils/message_checks.h>
-#include <moveit/collision_detection/collision_tools.h>
-#include <moveit/move_group/capability_names.h>
+#include "state_validation_service_capability.hpp"
+#include <moveit/moveit_cpp/moveit_cpp.hpp>
+#include <moveit/robot_state/conversions.hpp>
+#include <moveit/utils/message_checks.hpp>
+#include <moveit/collision_detection/collision_tools.hpp>
+#include <moveit/move_group/capability_names.hpp>
 
 namespace move_group
 {
-MoveGroupStateValidationService::MoveGroupStateValidationService() : MoveGroupCapability("StateValidationService")
+MoveGroupStateValidationService::MoveGroupStateValidationService() : MoveGroupCapability("state_validation_service")
 {
 }
 
 void MoveGroupStateValidationService::initialize()
 {
-  using std::placeholders::_1;
-  using std::placeholders::_2;
-  using std::placeholders::_3;
-
-  validity_service_ = context_->node_->create_service<moveit_msgs::srv::GetStateValidity>(
-      STATE_VALIDITY_SERVICE_NAME, std::bind(&MoveGroupStateValidationService::computeService, this, _1, _2, _3));
+  validity_service_ = context_->moveit_cpp_->getNode()->create_service<moveit_msgs::srv::GetStateValidity>(
+      STATE_VALIDITY_SERVICE_NAME, [this](const std::shared_ptr<rmw_request_id_t>& request_header,
+                                          const std::shared_ptr<moveit_msgs::srv::GetStateValidity::Request>& req,
+                                          const std::shared_ptr<moveit_msgs::srv::GetStateValidity::Response>& res) {
+        return computeService(request_header, req, res);
+      });
 }
 
 bool MoveGroupStateValidationService::computeService(
-    const std::shared_ptr<rmw_request_id_t> request_header,
-    const std::shared_ptr<moveit_msgs::srv::GetStateValidity::Request> req,
-    std::shared_ptr<moveit_msgs::srv::GetStateValidity::Response> res)
+    const std::shared_ptr<rmw_request_id_t>& /* unused */,
+    const std::shared_ptr<moveit_msgs::srv::GetStateValidity::Request>& req,
+    const std::shared_ptr<moveit_msgs::srv::GetStateValidity::Response>& res)
 {
   planning_scene_monitor::LockedPlanningSceneRO ls(context_->planning_scene_monitor_);
   moveit::core::RobotState rs = ls->getCurrentState();
@@ -83,11 +84,12 @@ bool MoveGroupStateValidationService::computeService(
   // copy contacts if any
   if (cres.collision)
   {
-    rclcpp::Time time_now = context_->node_->get_clock()->now();
+    rclcpp::Time time_now = context_->moveit_cpp_->getNode()->get_clock()->now();
     res->contacts.reserve(cres.contact_count);
     res->valid = false;
     for (collision_detection::CollisionResult::ContactMap::const_iterator it = cres.contacts.begin();
          it != cres.contacts.end(); ++it)
+    {
       for (const collision_detection::Contact& contact : it->second)
       {
         res->contacts.resize(res->contacts.size() + 1);
@@ -95,6 +97,7 @@ bool MoveGroupStateValidationService::computeService(
         res->contacts.back().header.frame_id = ls->getPlanningFrame();
         res->contacts.back().header.stamp = time_now;
       }
+    }
   }
 
   // copy cost sources

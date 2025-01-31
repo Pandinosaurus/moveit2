@@ -35,45 +35,50 @@
 
 /* Author: Ioan Sucan, Adam Leeper */
 
-#include "moveit/robot_interaction/robot_interaction.h"
-#include <moveit/robot_interaction/interaction_handler.h>
-#include <moveit/robot_interaction/interactive_marker_helpers.h>
-#include <moveit/robot_interaction/kinematic_options_map.h>
-#include <moveit/transforms/transforms.h>
+#include <moveit/robot_interaction/robot_interaction.hpp>
+#include <moveit/robot_interaction/interaction_handler.hpp>
+#include <moveit/robot_interaction/interactive_marker_helpers.hpp>
+#include <moveit/robot_interaction/kinematic_options_map.hpp>
+#include <moveit/transforms/transforms.hpp>
 #include <interactive_markers/interactive_marker_server.hpp>
 #include <interactive_markers/menu_handler.hpp>
-#include <tf2_eigen/tf2_eigen.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_eigen/tf2_eigen.hpp>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+// TODO: Remove conditional include when released to all active distros.
+#if __has_include(<tf2/LinearMath/Transform.hpp>)
+#include <tf2/LinearMath/Transform.hpp>
+#else
 #include <tf2/LinearMath/Transform.h>
-#include <boost/lexical_cast.hpp>
-#include <boost/math/constants/constants.hpp>
-#include <boost/algorithm/string.hpp>
+#endif
+#include <moveit/utils/logger.hpp>
 
 #include <algorithm>
 #include <limits>
+#include <string>
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 
 namespace robot_interaction
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_ros_robot_interaction.robot_interaction");
-static const float END_EFFECTOR_UNREACHABLE_COLOR[4] = { 1.0, 0.3, 0.3, 1.0 };
-static const float END_EFFECTOR_REACHABLE_COLOR[4] = { 0.2, 1.0, 0.2, 1.0 };
+static const double END_EFFECTOR_UNREACHABLE_COLOR[4] = { 1.0, 0.3, 0.3, 1.0 };
+static const double END_EFFECTOR_REACHABLE_COLOR[4] = { 0.2, 1.0, 0.2, 1.0 };
 
 const std::string RobotInteraction::INTERACTIVE_MARKER_TOPIC = "robot_interaction_interactive_marker_topic";
 
 RobotInteraction::RobotInteraction(const moveit::core::RobotModelConstPtr& robot_model,
                                    const rclcpp::Node::SharedPtr& node, const std::string& ns)
-  : robot_model_(robot_model), kinematic_options_map_(new KinematicOptionsMap)
+  : robot_model_(robot_model)
+  , node_(node)
+  , logger_(moveit::getLogger("moveit.ros.robot_interaction"))
+  , kinematic_options_map_(std::make_shared<KinematicOptionsMap>())
 {
   topic_ = ns.empty() ? INTERACTIVE_MARKER_TOPIC : ns + "/" + INTERACTIVE_MARKER_TOPIC;
-  node_ = node;
   int_marker_server_ = new interactive_markers::InteractiveMarkerServer(topic_, node_);
 
   // spin a thread that will process feedback events
   run_processing_thread_ = true;
-  processing_thread_.reset(new boost::thread(boost::bind(&RobotInteraction::processingThread, this)));
+  processing_thread_ = std::make_unique<std::thread>([this] { processingThread(); });
 }
 
 RobotInteraction::~RobotInteraction()
@@ -96,23 +101,25 @@ void RobotInteraction::decideActiveComponents(const std::string& group, Interact
   decideActiveEndEffectors(group, style);
   decideActiveJoints(group);
   if (!group.empty() && active_eef_.empty() && active_vj_.empty() && active_generic_.empty())
-    RCLCPP_INFO(LOGGER,
+  {
+    RCLCPP_INFO(logger_,
                 "No active joints or end effectors found for group '%s'. "
                 "Make sure that kinematics.yaml is loaded in this node's namespace.",
                 group.c_str());
+  }
 }
 
 void RobotInteraction::addActiveComponent(const InteractiveMarkerConstructorFn& construct,
                                           const ProcessFeedbackFn& process, const InteractiveMarkerUpdateFn& update,
                                           const std::string& name)
 {
-  boost::unique_lock<boost::mutex> ulock(marker_access_lock_);
+  std::unique_lock<std::mutex> ulock(marker_access_lock_);
   GenericInteraction g;
   g.construct_marker = construct;
   g.update_pose = update;
   g.process_feedback = process;
   // compute the suffix that will be added to the generated markers
-  g.marker_name_suffix = "_" + name + "_" + boost::lexical_cast<std::string>(active_generic_.size());
+  g.marker_name_suffix = "_" + name + "_" + std::to_string(active_generic_.size());
   active_generic_.push_back(g);
 }
 
@@ -136,9 +143,13 @@ double RobotInteraction::computeLinkMarkerSize(const std::string& link)
     // process kinematic chain upwards (but only following fixed joints)
     // to find a link with some non-empty shape (to ignore virtual links)
     if (lm->getParentJointModel()->getType() == moveit::core::JointModel::FIXED)
+    {
       lm = lm->getParentLinkModel();
+    }
     else
+    {
       lm = nullptr;
+    }
   }
   if (!lm)
     return DEFAULT_SCALE;  // no link with non-zero shape extends found
@@ -186,13 +197,13 @@ double RobotInteraction::computeGroupMarkerSize(const std::string& group)
 
 void RobotInteraction::decideActiveJoints(const std::string& group)
 {
-  boost::unique_lock<boost::mutex> ulock(marker_access_lock_);
+  std::unique_lock<std::mutex> ulock(marker_access_lock_);
   active_vj_.clear();
 
   if (group.empty())
     return;
 
-  RCLCPP_DEBUG(LOGGER, "Deciding active joints for group '%s'", group.c_str());
+  RCLCPP_DEBUG(logger_, "Deciding active joints for group '%s'", group.c_str());
 
   const srdf::ModelConstSharedPtr& srdf = robot_model_->getSRDF();
   const moveit::core::JointModelGroup* jmg = robot_model_->getJointModelGroup(group);
@@ -210,6 +221,7 @@ void RobotInteraction::decideActiveJoints(const std::string& group)
 
     const std::vector<srdf::Model::VirtualJoint>& vj = srdf->getVirtualJoints();
     for (const srdf::Model::VirtualJoint& joint : vj)
+    {
       if (joint.name_ == robot_model_->getRootJointName())
       {
         if (joint.type_ == "planar" || joint.type_ == "floating")
@@ -221,15 +233,20 @@ void RobotInteraction::decideActiveJoints(const std::string& group)
             v.parent_frame = v.parent_frame.substr(1);
           v.joint_name = joint.name_;
           if (joint.type_ == "planar")
+          {
             v.dof = 3;
+          }
           else
+          {
             v.dof = 6;
+          }
           // take the max of the X, Y, Z extent
           v.size = std::max(std::max(aabb[1] - aabb[0], aabb[3] - aabb[2]), aabb[5] - aabb[4]);
           active_vj_.push_back(v);
           used.insert(v.joint_name);
         }
       }
+    }
   }
 
   const std::vector<const moveit::core::JointModel*>& joints = jmg->getJointModels();
@@ -245,9 +262,13 @@ void RobotInteraction::decideActiveJoints(const std::string& group)
         v.parent_frame = joint->getParentLinkModel()->getName();
       v.joint_name = joint->getName();
       if (joint->getType() == moveit::core::JointModel::PLANAR)
+      {
         v.dof = 3;
+      }
       else
+      {
         v.dof = 6;
+      }
       // take the max of the X, Y, Z extent
       v.size = computeGroupMarkerSize(group);
       active_vj_.push_back(v);
@@ -262,20 +283,20 @@ void RobotInteraction::decideActiveEndEffectors(const std::string& group)
 
 void RobotInteraction::decideActiveEndEffectors(const std::string& group, InteractionStyle::InteractionStyle style)
 {
-  boost::unique_lock<boost::mutex> ulock(marker_access_lock_);
+  std::unique_lock<std::mutex> ulock(marker_access_lock_);
   active_eef_.clear();
 
   if (group.empty())
     return;
 
-  RCLCPP_DEBUG(LOGGER, "Deciding active end-effectors for group '%s'", group.c_str());
+  RCLCPP_DEBUG(logger_, "Deciding active end-effectors for group '%s'", group.c_str());
 
   const srdf::ModelConstSharedPtr& srdf = robot_model_->getSRDF();
   const moveit::core::JointModelGroup* jmg = robot_model_->getJointModelGroup(group);
 
   if (!jmg || !srdf)
   {
-    RCLCPP_WARN(LOGGER, "Unable to decide active end effector: no joint model group or no srdf model");
+    RCLCPP_WARN(logger_, "Unable to decide active end effector: no joint model group or no srdf model");
     return;
   }
 
@@ -283,63 +304,63 @@ void RobotInteraction::decideActiveEndEffectors(const std::string& group, Intera
   const std::pair<moveit::core::JointModelGroup::KinematicsSolver, moveit::core::JointModelGroup::KinematicsSolverMap>&
       smap = jmg->getGroupKinematics();
 
-  // if we have an IK solver for the selected group, we check if there are any end effectors attached to this group
-  if (smap.first)
-  {
+  auto add_active_end_effectors_for_single_group = [&](const moveit::core::JointModelGroup* single_group) {
+    bool found_eef{ false };
     for (const srdf::Model::EndEffector& eef : eefs)
-      if ((jmg->hasLinkModel(eef.parent_link_) || jmg->getName() == eef.parent_group_) &&
-          jmg->canSetStateFromIK(eef.parent_link_))
+    {
+      if (single_group->hasLinkModel(eef.parent_link_) &&
+          (eef.parent_group_.empty() || single_group->getName() == eef.parent_group_) &&
+          single_group->canSetStateFromIK(eef.parent_link_))
       {
         // We found an end-effector whose parent is the group.
         EndEffectorInteraction ee;
-        ee.parent_group = group;
+        ee.parent_group = single_group->getName();
         ee.parent_link = eef.parent_link_;
         ee.eef_group = eef.component_group_;
         ee.interaction = style;
         active_eef_.push_back(ee);
+        found_eef = true;
       }
-
-    // No end effectors found.  Use last link in group as the "end effector".
-    if (active_eef_.empty() && !jmg->getLinkModelNames().empty())
-    {
-      EndEffectorInteraction ee;
-      ee.parent_group = group;
-      ee.parent_link = jmg->getLinkModelNames().back();
-      ee.eef_group = group;
-      ee.interaction = style;
-      active_eef_.push_back(ee);
     }
+
+    // No end effectors found. Use last link in group as the "end effector".
+    if (!found_eef && !single_group->getLinkModelNames().empty())
+    {
+      std::string last_link{ single_group->getLinkModelNames().back() };
+
+      if (single_group->canSetStateFromIK(last_link))
+      {
+        EndEffectorInteraction ee;
+        ee.parent_group = single_group->getName();
+        ee.parent_link = last_link;
+        ee.eef_group = single_group->getName();
+        ee.interaction = style;
+        active_eef_.push_back(ee);
+      }
+    }
+  };
+
+  // if we have an IK solver for the selected group, we check if there are any end effectors attached to this group
+  if (smap.first)
+  {
+    add_active_end_effectors_for_single_group(jmg);
   }
+  // if the group contains subgroups with IK, add markers for them individually
   else if (!smap.second.empty())
   {
     for (const std::pair<const moveit::core::JointModelGroup* const, moveit::core::JointModelGroup::KinematicsSolver>&
              it : smap.second)
-    {
-      for (const srdf::Model::EndEffector& eef : eefs)
-      {
-        if ((it.first->hasLinkModel(eef.parent_link_) || jmg->getName() == eef.parent_group_) &&
-            it.first->canSetStateFromIK(eef.parent_link_))
-        {
-          // We found an end-effector whose parent is a subgroup of the group.  (May be more than one)
-          EndEffectorInteraction ee;
-          ee.parent_group = it.first->getName();
-          ee.parent_link = eef.parent_link_;
-          ee.eef_group = eef.component_group_;
-          ee.interaction = style;
-          active_eef_.push_back(ee);
-          break;
-        }
-      }
-    }
+      add_active_end_effectors_for_single_group(it.first);
   }
 
+  // lastly determine automatic marker sizes
   for (EndEffectorInteraction& eef : active_eef_)
   {
     // if we have a separate group for the eef, we compute the scale based on it;
     // otherwise, we use the size of the parent_link
     eef.size = (eef.eef_group == eef.parent_group) ? computeLinkMarkerSize(eef.parent_link) :
                                                      computeGroupMarkerSize(eef.eef_group);
-    RCLCPP_DEBUG(LOGGER, "Found active end-effector '%s', of scale %lf", eef.eef_group.c_str(), eef.size);
+    RCLCPP_DEBUG(logger_, "Found active end-effector '%s', of scale %lf", eef.eef_group.c_str(), eef.size);
   }
   // if there is only a single end effector marker, we can safely use a larger marker
   if (active_eef_.size() == 1)
@@ -348,7 +369,7 @@ void RobotInteraction::decideActiveEndEffectors(const std::string& group, Intera
 
 void RobotInteraction::clear()
 {
-  boost::unique_lock<boost::mutex> ulock(marker_access_lock_);
+  std::unique_lock<std::mutex> ulock(marker_access_lock_);
   active_eef_.clear();
   active_vj_.clear();
   active_generic_.clear();
@@ -358,7 +379,7 @@ void RobotInteraction::clear()
 
 void RobotInteraction::clearInteractiveMarkers()
 {
-  boost::unique_lock<boost::mutex> ulock(marker_access_lock_);
+  std::unique_lock<std::mutex> ulock(marker_access_lock_);
   clearInteractiveMarkersUnsafe();
 }
 
@@ -392,14 +413,20 @@ void RobotInteraction::addEndEffectorMarkers(const InteractionHandlerPtr& handle
   visualization_msgs::msg::InteractiveMarkerControl m_control;
   m_control.always_visible = false;
   if (position && orientation)
+  {
     m_control.interaction_mode = m_control.MOVE_ROTATE_3D;
+  }
   else if (orientation)
+  {
     m_control.interaction_mode = m_control.ROTATE_3D;
+  }
   else
+  {
     m_control.interaction_mode = m_control.MOVE_3D;
+  }
 
   std_msgs::msg::ColorRGBA marker_color;
-  const float* color = handler->inError(eef) ? END_EFFECTOR_UNREACHABLE_COLOR : END_EFFECTOR_REACHABLE_COLOR;
+  const double* color = handler->inError(eef) ? END_EFFECTOR_UNREACHABLE_COLOR : END_EFFECTOR_REACHABLE_COLOR;
   marker_color.r = color[0];
   marker_color.g = color[1];
   marker_color.b = color[2];
@@ -408,7 +435,7 @@ void RobotInteraction::addEndEffectorMarkers(const InteractionHandlerPtr& handle
   moveit::core::RobotStateConstPtr rstate = handler->getState();
   const std::vector<std::string>& link_names = rstate->getJointModelGroup(eef.eef_group)->getLinkModelNames();
   visualization_msgs::msg::MarkerArray marker_array;
-  rstate->getRobotMarkers(marker_array, link_names, marker_color, eef.eef_group, rclcpp::Duration(0.0));
+  rstate->getRobotMarkers(marker_array, link_names, marker_color, eef.eef_group, rclcpp::Duration::from_seconds(0));
   tf2::Transform tf_root_to_link;
   tf2::fromMsg(tf2::toMsg(rstate->getGlobalLinkTransform(eef.parent_link)), tf_root_to_link);
   // Release the ptr count on the kinematic state
@@ -454,7 +481,7 @@ void RobotInteraction::addInteractiveMarkers(const InteractionHandlerPtr& handle
   // If scale is left at default size of 0, scale will be based on end effector link size. a good value is between 0-1
   std::vector<visualization_msgs::msg::InteractiveMarker> ims;
   {
-    boost::unique_lock<boost::mutex> ulock(marker_access_lock_);
+    std::unique_lock<std::mutex> ulock(marker_access_lock_);
     moveit::core::RobotStateConstPtr s = handler->getState();
 
     for (std::size_t i = 0; i < active_generic_.size(); ++i)
@@ -465,7 +492,7 @@ void RobotInteraction::addInteractiveMarkers(const InteractionHandlerPtr& handle
         im.name = getMarkerName(handler, active_generic_[i]);
         shown_markers_[im.name] = i;
         ims.push_back(im);
-        RCLCPP_DEBUG(LOGGER, "Publishing interactive marker %s (size = %lf)", im.name.c_str(), im.scale);
+        RCLCPP_DEBUG(logger_, "Publishing interactive marker %s (size = %lf)", im.name.c_str(), im.scale);
       }
     }
 
@@ -503,12 +530,14 @@ void RobotInteraction::addInteractiveMarkers(const InteractionHandlerPtr& handle
       }
       if (handler && handler->getMeshesVisible() &&
           (active_eef_[i].interaction & (InteractionStyle::POSITION_EEF | InteractionStyle::ORIENTATION_EEF)))
+      {
         addEndEffectorMarkers(handler, active_eef_[i], control_to_eef_tf, im,
                               active_eef_[i].interaction & InteractionStyle::POSITION_EEF,
                               active_eef_[i].interaction & InteractionStyle::ORIENTATION_EEF);
+      }
       ims.push_back(im);
       registerMoveInteractiveMarkerTopic(marker_name, handler->getName() + "_" + active_eef_[i].parent_link);
-      RCLCPP_DEBUG(LOGGER, "Publishing interactive marker %s (size = %lf)", marker_name.c_str(), mscale);
+      RCLCPP_DEBUG(logger_, "Publishing interactive marker %s (size = %lf)", marker_name.c_str(), mscale);
     }
     for (std::size_t i = 0; i < active_vj_.size(); ++i)
     {
@@ -525,14 +554,18 @@ void RobotInteraction::addInteractiveMarkers(const InteractionHandlerPtr& handle
       visualization_msgs::msg::InteractiveMarker im = makeEmptyInteractiveMarker(marker_name, pose, mscale);
       if (handler && handler->getControlsVisible())
       {
-        if (active_vj_[i].dof == 3)  // planar joint
+        if (active_vj_[i].dof == 3)
+        {  // planar joint
           addPlanarXYControl(im, false);
+        }
         else
+        {
           add6DOFControl(im, false);
+        }
       }
       ims.push_back(im);
       registerMoveInteractiveMarkerTopic(marker_name, handler->getName() + "_" + active_vj_[i].connecting_link);
-      RCLCPP_DEBUG(LOGGER, "Publishing interactive marker %s (size = %lf)", marker_name.c_str(), mscale);
+      RCLCPP_DEBUG(logger_, "Publishing interactive marker %s (size = %lf)", marker_name.c_str(), mscale);
     }
     handlers_[handler->getName()] = handler;
   }
@@ -543,8 +576,8 @@ void RobotInteraction::addInteractiveMarkers(const InteractionHandlerPtr& handle
   for (const visualization_msgs::msg::InteractiveMarker& im : ims)
   {
     int_marker_server_->insert(im);
-    int_marker_server_->setCallback(im.name, boost::bind(&RobotInteraction::processInteractiveMarkerFeedback, this,
-                                                         boost::placeholders::_1));
+    int_marker_server_->setCallback(im.name,
+                                    [this](const auto& feedback) { processInteractiveMarkerFeedback(feedback); });
 
     // Add menu handler to all markers that this interaction handler creates.
     if (std::shared_ptr<interactive_markers::MenuHandler> mh = handler->getMenuHandler())
@@ -565,23 +598,26 @@ void RobotInteraction::toggleMoveInteractiveMarkerTopic(bool enable)
 {
   if (enable)
   {
-    boost::unique_lock<boost::mutex> ulock(marker_access_lock_);
+    std::unique_lock<std::mutex> ulock(marker_access_lock_);
     if (int_marker_move_subscribers_.empty())
     {
-      for (size_t i = 0; i < int_marker_move_topics_.size(); i++)
+      for (size_t i = 0; i < int_marker_move_topics_.size(); ++i)
       {
         std::string topic_name = int_marker_move_topics_[i];
         std::string marker_name = int_marker_names_[i];
-        int_marker_move_subscribers_.push_back(node_->create_subscription<geometry_msgs::msg::PointStamped>(
-            topic_name, 1, [this, marker_name](const geometry_msgs::msg::PoseStamped::ConstSharedPtr msg) {
-              moveInteractiveMarker(marker_name, msg);
-            }));
+        std::function<void(const geometry_msgs::msg::PoseStamped::SharedPtr)> subscription_callback =
+            [this, marker_name](const geometry_msgs::msg::PoseStamped::SharedPtr& msg) {
+              moveInteractiveMarker(marker_name, *msg);
+            };
+        auto subscription = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
+            topic_name, rclcpp::SystemDefaultsQoS(), subscription_callback);
+        int_marker_move_subscribers_.push_back(subscription);
       }
     }
   }
   else
   {
-    boost::unique_lock<boost::mutex> ulock(marker_access_lock_);
+    std::unique_lock<std::mutex> ulock(marker_access_lock_);
     int_marker_move_subscribers_.clear();
   }
 }
@@ -620,7 +656,7 @@ void RobotInteraction::updateInteractiveMarkers(const InteractionHandlerPtr& han
   std::string root_link;
   std::map<std::string, geometry_msgs::msg::Pose> pose_updates;
   {
-    boost::unique_lock<boost::mutex> ulock(marker_access_lock_);
+    std::unique_lock<std::mutex> ulock(marker_access_lock_);
 
     moveit::core::RobotStateConstPtr s = handler->getState();
     root_link = s->getRobotModel()->getModelFrame();
@@ -663,35 +699,40 @@ void RobotInteraction::publishInteractiveMarkers()
 
 bool RobotInteraction::showingMarkers(const InteractionHandlerPtr& handler)
 {
-  boost::unique_lock<boost::mutex> ulock(marker_access_lock_);
+  std::unique_lock<std::mutex> ulock(marker_access_lock_);
 
   for (const EndEffectorInteraction& eef : active_eef_)
+  {
     if (shown_markers_.find(getMarkerName(handler, eef)) == shown_markers_.end())
       return false;
+  }
   for (const JointInteraction& vj : active_vj_)
+  {
     if (shown_markers_.find(getMarkerName(handler, vj)) == shown_markers_.end())
       return false;
+  }
   for (const GenericInteraction& gi : active_generic_)
+  {
     if (shown_markers_.find(getMarkerName(handler, gi)) == shown_markers_.end())
       return false;
+  }
   return true;
 }
 
-void RobotInteraction::moveInteractiveMarker(const std::string& name,
-                                             const geometry_msgs::msg::PoseStamped::ConstSharedPtr msg)
+void RobotInteraction::moveInteractiveMarker(const std::string& name, const geometry_msgs::msg::PoseStamped& msg)
 {
   std::map<std::string, std::size_t>::const_iterator it = shown_markers_.find(name);
   if (it != shown_markers_.end())
   {
     auto feedback = std::make_shared<visualization_msgs::msg::InteractiveMarkerFeedback>();
-    feedback->header = msg->header;
+    feedback->header = msg.header;
     feedback->marker_name = name;
-    feedback->pose = msg->pose;
+    feedback->pose = msg.pose;
     feedback->event_type = visualization_msgs::msg::InteractiveMarkerFeedback::POSE_UPDATE;
     processInteractiveMarkerFeedback(feedback);
     {
-      boost::unique_lock<boost::mutex> ulock(marker_access_lock_);
-      int_marker_server_->setPose(name, msg->pose, msg->header);  // move the interactive marker
+      std::unique_lock<std::mutex> ulock(marker_access_lock_);
+      int_marker_server_->setPose(name, msg.pose, msg.header);  // move the interactive marker
       int_marker_server_->applyChanges();
     }
   }
@@ -701,11 +742,11 @@ void RobotInteraction::processInteractiveMarkerFeedback(
     const visualization_msgs::msg::InteractiveMarkerFeedback::ConstSharedPtr& feedback)
 {
   // perform some validity checks
-  boost::unique_lock<boost::mutex> ulock(marker_access_lock_);
+  std::unique_lock<std::mutex> ulock(marker_access_lock_);
   std::map<std::string, std::size_t>::const_iterator it = shown_markers_.find(feedback->marker_name);
   if (it == shown_markers_.end())
   {
-    RCLCPP_ERROR(LOGGER, "Unknown marker name: '%s' (not published by RobotInteraction class)",
+    RCLCPP_ERROR(logger_, "Unknown marker name: '%s' (not published by RobotInteraction class)",
                  feedback->marker_name.c_str());
     return;
   }
@@ -713,7 +754,7 @@ void RobotInteraction::processInteractiveMarkerFeedback(
   std::size_t u = feedback->marker_name.find_first_of('_');
   if (u == std::string::npos || u < 4)
   {
-    RCLCPP_ERROR(LOGGER, "Invalid marker name: '%s'", feedback->marker_name.c_str());
+    RCLCPP_ERROR(logger_, "Invalid marker name: '%s'", feedback->marker_name.c_str());
     return;
   }
 
@@ -723,7 +764,7 @@ void RobotInteraction::processInteractiveMarkerFeedback(
 
 void RobotInteraction::processingThread()
 {
-  boost::unique_lock<boost::mutex> ulock(marker_access_lock_);
+  std::unique_lock<std::mutex> ulock(marker_access_lock_);
 
   while (run_processing_thread_ && rclcpp::ok())
   {
@@ -734,12 +775,12 @@ void RobotInteraction::processingThread()
     {
       auto feedback = feedback_map_.begin()->second;
       feedback_map_.erase(feedback_map_.begin());
-      RCLCPP_DEBUG(LOGGER, "Processing feedback from map for marker [%s]", feedback->marker_name.c_str());
+      RCLCPP_DEBUG(logger_, "Processing feedback from map for marker [%s]", feedback->marker_name.c_str());
 
       std::map<std::string, std::size_t>::const_iterator it = shown_markers_.find(feedback->marker_name);
       if (it == shown_markers_.end())
       {
-        RCLCPP_ERROR(LOGGER,
+        RCLCPP_ERROR(logger_,
                      "Unknown marker name: '%s' (not published by RobotInteraction class) "
                      "(should never have ended up in the feedback_map!)",
                      feedback->marker_name.c_str());
@@ -748,7 +789,7 @@ void RobotInteraction::processingThread()
       std::size_t u = feedback->marker_name.find_first_of('_');
       if (u == std::string::npos || u < 4)
       {
-        RCLCPP_ERROR(LOGGER, "Invalid marker name: '%s' (should never have ended up in the feedback_map!)",
+        RCLCPP_ERROR(logger_, "Invalid marker name: '%s' (should never have ended up in the feedback_map!)",
                      feedback->marker_name.c_str());
         continue;
       }
@@ -757,7 +798,7 @@ void RobotInteraction::processingThread()
       std::map<std::string, InteractionHandlerPtr>::const_iterator jt = handlers_.find(handler_name);
       if (jt == handlers_.end())
       {
-        RCLCPP_ERROR(LOGGER, "Interactive Marker Handler '%s' is not known.", handler_name.c_str());
+        RCLCPP_ERROR(logger_, "Interactive Marker Handler '%s' is not known.", handler_name.c_str());
         continue;
       }
 
@@ -776,7 +817,7 @@ void RobotInteraction::processingThread()
           }
           catch (std::exception& ex)
           {
-            RCLCPP_ERROR(LOGGER, "Exception caught while handling end-effector update: %s", ex.what());
+            RCLCPP_ERROR(logger_, "Exception caught while handling end-effector update: %s", ex.what());
           }
           marker_access_lock_.lock();
         }
@@ -792,7 +833,7 @@ void RobotInteraction::processingThread()
           }
           catch (std::exception& ex)
           {
-            RCLCPP_ERROR(LOGGER, "Exception caught while handling joint update: %s", ex.what());
+            RCLCPP_ERROR(logger_, "Exception caught while handling joint update: %s", ex.what());
           }
           marker_access_lock_.lock();
         }
@@ -807,17 +848,19 @@ void RobotInteraction::processingThread()
           }
           catch (std::exception& ex)
           {
-            RCLCPP_ERROR(LOGGER, "Exception caught while handling joint update: %s", ex.what());
+            RCLCPP_ERROR(logger_, "Exception caught while handling joint update: %s", ex.what());
           }
           marker_access_lock_.lock();
         }
         else
-          RCLCPP_ERROR(LOGGER, "Unknown marker class ('%s') for marker '%s'", marker_class.c_str(),
+        {
+          RCLCPP_ERROR(logger_, "Unknown marker class ('%s') for marker '%s'", marker_class.c_str(),
                        feedback->marker_name.c_str());
+        }
       }
       catch (std::exception& ex)
       {
-        RCLCPP_ERROR(LOGGER, "Exception caught while processing event: %s", ex.what());
+        RCLCPP_ERROR(logger_, "Exception caught while processing event: %s", ex.what());
       }
     }
   }

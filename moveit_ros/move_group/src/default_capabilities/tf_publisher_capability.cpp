@@ -34,20 +34,20 @@
 
 /* Author: Jonas Tietz */
 
-#include "tf_publisher_capability.h"
-#include <moveit/utils/message_checks.h>
-#include <moveit/move_group/capability_names.h>
+#include "tf_publisher_capability.hpp"
+#include <moveit/moveit_cpp/moveit_cpp.hpp>
+#include <moveit/utils/message_checks.hpp>
+#include <moveit/move_group/capability_names.hpp>
 #include <tf2_ros/transform_broadcaster.h>
-#include <tf2_eigen/tf2_eigen.h>
-#include <moveit/robot_state/robot_state.h>
-#include <moveit/robot_state/attached_body.h>
+#include <tf2_eigen/tf2_eigen.hpp>
+#include <moveit/robot_state/robot_state.hpp>
+#include <moveit/robot_state/attached_body.hpp>
+#include <moveit/utils/logger.hpp>
 
 namespace move_group
 {
-static const rclcpp::Logger LOGGER =
-    rclcpp::get_logger("moveit_move_group_default_capabilities.tf_publisher_capability");
 
-TfPublisher::TfPublisher() : MoveGroupCapability("TfPublisher")
+TfPublisher::TfPublisher() : MoveGroupCapability("tf_publisher")
 {
 }
 
@@ -60,7 +60,7 @@ TfPublisher::~TfPublisher()
 namespace
 {
 void publishSubframes(tf2_ros::TransformBroadcaster& broadcaster, const moveit::core::FixedTransformsMap& subframes,
-                      const std::string& parent_object, const std::string& parent_frame, const rclcpp::Time& stamp)
+                      const std::string& parent_object, const rclcpp::Time& stamp)
 {
   geometry_msgs::msg::TransformStamped transform;
   for (auto& subframe : subframes)
@@ -68,7 +68,7 @@ void publishSubframes(tf2_ros::TransformBroadcaster& broadcaster, const moveit::
     transform = tf2::eigenToTransform(subframe.second);
     transform.child_frame_id = parent_object + "/" + subframe.first;
     transform.header.stamp = stamp;
-    transform.header.frame_id = parent_frame;
+    transform.header.frame_id = parent_object;
     broadcaster.sendTransform(transform);
   }
 }
@@ -76,14 +76,14 @@ void publishSubframes(tf2_ros::TransformBroadcaster& broadcaster, const moveit::
 
 void TfPublisher::publishPlanningSceneFrames()
 {
-  tf2_ros::TransformBroadcaster broadcaster(context_->node_);
+  tf2_ros::TransformBroadcaster broadcaster(context_->moveit_cpp_->getNode());
   geometry_msgs::msg::TransformStamped transform;
   rclcpp::Rate rate(rate_);
 
   while (keep_running_)
   {
     {
-      rclcpp::Time stamp = context_->node_->get_clock()->now();
+      rclcpp::Time stamp = context_->moveit_cpp_->getNode()->get_clock()->now();
       planning_scene_monitor::LockedPlanningSceneRO locked_planning_scene(context_->planning_scene_monitor_);
       collision_detection::WorldConstPtr world = locked_planning_scene->getWorld();
       std::string planning_frame = locked_planning_scene->getPlanningFrame();
@@ -91,14 +91,14 @@ void TfPublisher::publishPlanningSceneFrames()
       for (const auto& obj : *world)
       {
         std::string object_frame = prefix_ + obj.second->id_;
-        transform = tf2::eigenToTransform(obj.second->shape_poses_[0]);
+        transform = tf2::eigenToTransform(obj.second->pose_);
         transform.child_frame_id = object_frame;
         transform.header.stamp = stamp;
         transform.header.frame_id = planning_frame;
         broadcaster.sendTransform(transform);
 
         const moveit::core::FixedTransformsMap& subframes = obj.second->subframe_poses_;
-        publishSubframes(broadcaster, subframes, object_frame, planning_frame, stamp);
+        publishSubframes(broadcaster, subframes, object_frame, stamp);
       }
 
       const moveit::core::RobotState& rs = locked_planning_scene->getCurrentState();
@@ -107,14 +107,14 @@ void TfPublisher::publishPlanningSceneFrames()
       for (const moveit::core::AttachedBody* attached_body : attached_collision_objects)
       {
         std::string object_frame = prefix_ + attached_body->getName();
-        transform = tf2::eigenToTransform(attached_body->getFixedTransforms()[0]);
+        transform = tf2::eigenToTransform(attached_body->getPose());
         transform.child_frame_id = object_frame;
         transform.header.stamp = stamp;
         transform.header.frame_id = attached_body->getAttachedLinkName();
         broadcaster.sendTransform(transform);
 
-        const moveit::core::FixedTransformsMap& subframes = attached_body->getSubframeTransforms();
-        publishSubframes(broadcaster, subframes, object_frame, attached_body->getAttachedLinkName(), stamp);
+        const moveit::core::FixedTransformsMap& subframes = attached_body->getSubframes();
+        publishSubframes(broadcaster, subframes, object_frame, stamp);
       }
     }
 
@@ -124,15 +124,16 @@ void TfPublisher::publishPlanningSceneFrames()
 
 void TfPublisher::initialize()
 {
-  std::string prefix = context_->node_->get_name();
-  context_->node_->get_parameter_or("planning_scene_frame_publishing_rate", rate_, 10);
-  context_->node_->get_parameter_or("planning_scene_tf_prefix", prefix_, prefix);
+  std::string prefix = context_->moveit_cpp_->getNode()->get_name();
+  context_->moveit_cpp_->getNode()->get_parameter_or("planning_scene_frame_publishing_rate", rate_, 10);
+  context_->moveit_cpp_->getNode()->get_parameter_or("planning_scene_tf_prefix", prefix_, prefix);
   if (!prefix_.empty())
     prefix_ += "/";
 
   keep_running_ = true;
 
-  RCLCPP_INFO(LOGGER, "Initializing MoveGroupTfPublisher with a frame publishing rate of %d", rate_);
+  RCLCPP_INFO(moveit::getLogger("moveit.ros.move_group.tf_publisher"),
+              "Initializing MoveGroupTfPublisher with a frame publishing rate of %d", rate_);
   thread_ = std::thread(&TfPublisher::publishPlanningSceneFrames, this);
 }
 }  // namespace move_group

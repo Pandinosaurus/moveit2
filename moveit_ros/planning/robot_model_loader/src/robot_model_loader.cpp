@@ -34,25 +34,30 @@
 
 /* Author: Ioan Sucan, E. Gil Jones */
 
-#include <moveit/robot_model_loader/robot_model_loader.h>
-#include <moveit/profiler/profiler.h>
-#include "rclcpp/rclcpp.hpp"
+#include <moveit/robot_model_loader/robot_model_loader.hpp>
+#include <rclcpp/clock.hpp>
+#include <rclcpp/duration.hpp>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <rclcpp/parameter_value.hpp>
+#include <rclcpp/time.hpp>
 #include <typeinfo>
+#include <moveit/utils/logger.hpp>
 
 namespace robot_model_loader
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_ros.robot_model_loader");
 
 RobotModelLoader::RobotModelLoader(const rclcpp::Node::SharedPtr& node, const std::string& robot_description,
                                    bool load_kinematics_solvers)
-  : node_(node)
+  : node_(node), logger_(moveit::getLogger("moveit.ros.robot_model_loader"))
 {
   Options opt(robot_description);
-  opt.load_kinematics_solvers_ = load_kinematics_solvers;
+  opt.load_kinematics_solvers = load_kinematics_solvers;
   configure(opt);
 }
 
-RobotModelLoader::RobotModelLoader(const rclcpp::Node::SharedPtr& node, const Options& opt) : node_(node)
+RobotModelLoader::RobotModelLoader(const rclcpp::Node::SharedPtr& node, const Options& opt)
+  : node_(node), logger_(moveit::getLogger("moveit.ros.robot_model_loader"))
 {
   configure(opt);
 }
@@ -71,23 +76,23 @@ RobotModelLoader::~RobotModelLoader()
 
 namespace
 {
-bool canSpecifyPosition(const moveit::core::JointModel* jmodel, const unsigned int index)
+bool canSpecifyPosition(const moveit::core::JointModel* jmodel, const unsigned int index, const rclcpp::Logger& logger)
 {
   bool ok = false;
   if (jmodel->getType() == moveit::core::JointModel::PLANAR && index == 2)
   {
-    RCLCPP_ERROR(LOGGER, "Cannot specify position limits for orientation of planar joint '%s'",
+    RCLCPP_ERROR(logger, "Cannot specify position limits for orientation of planar joint '%s'",
                  jmodel->getName().c_str());
   }
   else if (jmodel->getType() == moveit::core::JointModel::FLOATING && index > 2)
   {
-    RCLCPP_ERROR(LOGGER, "Cannot specify position limits for orientation of floating joint '%s'",
+    RCLCPP_ERROR(logger, "Cannot specify position limits for orientation of floating joint '%s'",
                  jmodel->getName().c_str());
   }
   else if (jmodel->getType() == moveit::core::JointModel::REVOLUTE &&
            static_cast<const moveit::core::RevoluteJointModel*>(jmodel)->isContinuous())
   {
-    RCLCPP_ERROR(LOGGER, "Cannot specify position limits for continuous joint '%s'", jmodel->getName().c_str());
+    RCLCPP_ERROR(logger, "Cannot specify position limits for continuous joint '%s'", jmodel->getName().c_str());
   }
   else
   {
@@ -99,26 +104,25 @@ bool canSpecifyPosition(const moveit::core::JointModel* jmodel, const unsigned i
 
 void RobotModelLoader::configure(const Options& opt)
 {
-  moveit::tools::Profiler::ScopedStart prof_start;
-  moveit::tools::Profiler::ScopedBlock prof_block("RobotModelLoader::configure");
-
   rclcpp::Clock clock;
   rclcpp::Time start = clock.now();
-  if (!opt.urdf_string_.empty() && !opt.srdf_string_.empty())
-    rdf_loader_.reset(new rdf_loader::RDFLoader(opt.urdf_string_, opt.srdf_string_));
+  if (!opt.urdf_string_.empty() && !opt.srdf_string.empty())
+  {
+    rdf_loader_ = std::make_shared<rdf_loader::RDFLoader>(opt.urdf_string_, opt.srdf_string);
+  }
   else
-    rdf_loader_.reset(new rdf_loader::RDFLoader(node_, opt.robot_description_));
+  {
+    rdf_loader_ = std::make_shared<rdf_loader::RDFLoader>(node_, opt.robot_description);
+  }
   if (rdf_loader_->getURDF())
   {
     const srdf::ModelSharedPtr& srdf =
-        rdf_loader_->getSRDF() ? rdf_loader_->getSRDF() : srdf::ModelSharedPtr(new srdf::Model());
-    model_.reset(new moveit::core::RobotModel(rdf_loader_->getURDF(), srdf));
+        rdf_loader_->getSRDF() ? rdf_loader_->getSRDF() : std::make_shared<srdf::Model>();
+    model_ = std::make_shared<moveit::core::RobotModel>(rdf_loader_->getURDF(), srdf);
   }
 
   if (model_ && !rdf_loader_->getRobotDescription().empty())
   {
-    moveit::tools::Profiler::ScopedBlock prof_block2("RobotModelLoader::configure joint limits");
-
     // if there are additional joint limits specified in some .yaml file, read those in
     for (moveit::core::JointModel* joint_model : model_->getJointModels())
     {
@@ -131,73 +135,75 @@ void RobotModelLoader::configure(const Options& opt)
         std::string param_name;
         try
         {
-          // Need to check before setting to true
-          joint_limit[joint_id].has_position_limits = false;
+          param_name = prefix + "max_position";
+          if (!node_->has_parameter(param_name))
+          {
+            node_->declare_parameter(param_name, rclcpp::ParameterType::PARAMETER_DOUBLE);
+          }
+          double max_position;
+          if (node_->get_parameter(param_name, max_position))
+          {
+            if (canSpecifyPosition(joint_model, joint_id, logger_))
+            {
+              joint_limit[joint_id].has_position_limits = true;
+              joint_limit[joint_id].max_position = max_position;
+            }
+          }
+
+          param_name = prefix + "min_position";
+          if (!node_->has_parameter(param_name))
+          {
+            node_->declare_parameter(param_name, rclcpp::ParameterType::PARAMETER_DOUBLE);
+          }
+          double min_position;
+          if (node_->get_parameter(param_name, min_position))
+          {
+            if (canSpecifyPosition(joint_model, joint_id, logger_))
+            {
+              joint_limit[joint_id].has_position_limits = true;
+              joint_limit[joint_id].min_position = min_position;
+            }
+          }
 
           // Check if parameter has been declared to avoid exception
-          param_name = prefix + "has_position_limits";
-          bool has_position_limits = false;
-          if (!node_->has_parameter(param_name))
-          {
-            node_->declare_parameter(param_name);
-          }
-          node_->get_parameter(param_name, has_position_limits);
-
           param_name = prefix + "has_velocity_limits";
-          bool has_vel_limits = false;
           if (!node_->has_parameter(param_name))
           {
-            node_->declare_parameter(param_name);
+            node_->declare_parameter(param_name, rclcpp::ParameterType::PARAMETER_BOOL);
           }
-          node_->get_parameter(param_name, has_vel_limits);
+          bool has_vel_limits = false;
+          if (node_->get_parameter(param_name, has_vel_limits))
+            joint_limit[joint_id].has_velocity_limits = has_vel_limits;
 
           param_name = prefix + "has_acceleration_limits";
-          bool has_acc_limits = false;
           if (!node_->has_parameter(param_name))
           {
-            node_->declare_parameter(param_name);
+            node_->declare_parameter(param_name, rclcpp::ParameterType::PARAMETER_BOOL);
           }
-          node_->get_parameter(param_name, has_acc_limits);
+          bool has_acc_limits = false;
+          if (node_->get_parameter(param_name, has_acc_limits))
+            joint_limit[joint_id].has_acceleration_limits = has_acc_limits;
 
-          // All types of joints can handle velocity and acceleration limits
-          joint_limit[joint_id].has_velocity_limits = has_vel_limits;
-          joint_limit[joint_id].has_acceleration_limits = has_acc_limits;
-
-          if (has_position_limits && canSpecifyPosition(joint_model, joint_id))
+          param_name = prefix + "has_jerk_limits";
+          if (!node_->has_parameter(param_name))
           {
-            const auto max_pos_name = prefix + "max_position";
-            if (!node_->has_parameter(max_pos_name))
-            {
-              node_->declare_parameter(max_pos_name);
-            }
-
-            const auto min_pos_name = prefix + "min_position";
-            if (!node_->has_parameter(min_pos_name))
-            {
-              node_->declare_parameter(min_pos_name);
-            }
-
-            if (!node_->get_parameter(max_pos_name, joint_limit[joint_id].max_position) ||
-                !node_->get_parameter(min_pos_name, joint_limit[joint_id].min_position))
-            {
-              RCLCPP_ERROR(LOGGER, "Specified a position limit for joint: %s but did not set a max or min position",
-                           joint_limit[joint_id].joint_name.c_str());
-            }
-
-            joint_limit[joint_id].has_position_limits = has_position_limits;
+            node_->declare_parameter(param_name, rclcpp::ParameterType::PARAMETER_BOOL);
           }
+          bool has_jerk_limits = false;
+          if (node_->get_parameter(param_name, has_jerk_limits))
+            joint_limit[joint_id].has_jerk_limits = has_jerk_limits;
 
           if (has_vel_limits)
           {
             param_name = prefix + "max_velocity";
             if (!node_->has_parameter(param_name))
             {
-              node_->declare_parameter(param_name);
+              node_->declare_parameter(param_name, rclcpp::ParameterType::PARAMETER_DOUBLE);
             }
 
             if (!node_->get_parameter(param_name, joint_limit[joint_id].max_velocity))
             {
-              RCLCPP_ERROR(LOGGER, "Specified a velocity limit for joint: %s but did not set a max velocity",
+              RCLCPP_ERROR(logger_, "Specified a velocity limit for joint: %s but did not set a max velocity",
                            joint_limit[joint_id].joint_name.c_str());
             }
           }
@@ -207,52 +213,68 @@ void RobotModelLoader::configure(const Options& opt)
             param_name = prefix + "max_acceleration";
             if (!node_->has_parameter(param_name))
             {
-              node_->declare_parameter(param_name);
+              node_->declare_parameter(param_name, rclcpp::ParameterType::PARAMETER_DOUBLE);
             }
 
             if (!node_->get_parameter(param_name, joint_limit[joint_id].max_acceleration))
             {
-              RCLCPP_ERROR(LOGGER, "Specified an acceleration limit for joint: %s but did not set a max acceleration",
+              RCLCPP_ERROR(logger_, "Specified an acceleration limit for joint: %s but did not set a max acceleration",
+                           joint_limit[joint_id].joint_name.c_str());
+            }
+          }
+
+          if (has_jerk_limits)
+          {
+            param_name = prefix + "max_jerk";
+            if (!node_->has_parameter(param_name))
+            {
+              node_->declare_parameter(param_name, rclcpp::ParameterType::PARAMETER_DOUBLE);
+            }
+
+            if (!node_->get_parameter(param_name, joint_limit[joint_id].max_jerk))
+            {
+              RCLCPP_ERROR(logger_, "Specified a jerk limit for joint: %s but did not set a max jerk",
                            joint_limit[joint_id].joint_name.c_str());
             }
           }
         }
         catch (const rclcpp::ParameterTypeException& e)
         {
-          RCLCPP_ERROR(LOGGER, "When getting the parameter %s: %s", param_name.c_str(), e.what());
+          RCLCPP_ERROR_STREAM(logger_, "When getting the parameter " << param_name.c_str() << ": " << e.what());
         }
       }
       joint_model->setVariableBounds(joint_limit);
     }
   }
 
-  if (model_ && opt.load_kinematics_solvers_)
+  if (model_ && opt.load_kinematics_solvers)
     loadKinematicsSolvers();
 
-  RCLCPP_DEBUG(node_->get_logger(), "Loaded kinematic model in %d seconds", (clock.now() - start).seconds());
+  RCLCPP_DEBUG(logger_, "Loaded kinematic model in %f seconds", (clock.now() - start).seconds());
 }
 
 void RobotModelLoader::loadKinematicsSolvers(const kinematics_plugin_loader::KinematicsPluginLoaderPtr& kloader)
 {
-  moveit::tools::Profiler::ScopedStart prof_start;
-  moveit::tools::Profiler::ScopedBlock prof_block("RobotModelLoader::loadKinematicsSolvers");
-
   if (rdf_loader_ && model_)
   {
     // load the kinematics solvers
     if (kloader)
+    {
       kinematics_loader_ = kloader;
+    }
     else
-      kinematics_loader_.reset(
-          new kinematics_plugin_loader::KinematicsPluginLoader(node_, rdf_loader_->getRobotDescription()));
+    {
+      kinematics_loader_ =
+          std::make_shared<kinematics_plugin_loader::KinematicsPluginLoader>(node_, rdf_loader_->getRobotDescription());
+    }
     moveit::core::SolverAllocatorFn kinematics_allocator =
         kinematics_loader_->getLoaderFunction(rdf_loader_->getSRDF());
     const std::vector<std::string>& groups = kinematics_loader_->getKnownGroups();
     std::stringstream ss;
     std::copy(groups.begin(), groups.end(), std::ostream_iterator<std::string>(ss, " "));
-    RCLCPP_DEBUG(LOGGER, "Loaded information about the following groups: '%s' ", ss.str().c_str());
+    RCLCPP_DEBUG(logger_, "Loaded information about the following groups: '%s' ", ss.str().c_str());
     if (groups.empty() && !model_->getJointModelGroups().empty())
-      RCLCPP_WARN(LOGGER, "No kinematics plugins defined. Fill and load kinematics.yaml!");
+      RCLCPP_WARN(logger_, "No kinematics plugins defined. Fill and load kinematics.yaml!");
 
     std::map<std::string, moveit::core::SolverAllocatorFn> imap;
     for (const std::string& group : groups)
@@ -273,13 +295,14 @@ void RobotModelLoader::loadKinematicsSolvers(const kinematics_plugin_loader::Kin
         }
         else
         {
-          RCLCPP_ERROR(LOGGER, "Kinematics solver %s does not support joint group %s.  Error: %s",
-                       typeid(*solver).name(), group.c_str(), error_msg.c_str());
+          const auto& s = *solver;  // avoid clang-tidy's -Wpotentially-evaluated-expression
+          RCLCPP_ERROR(logger_, "Kinematics solver %s does not support joint group %s.  Error: %s", typeid(s).name(),
+                       group.c_str(), error_msg.c_str());
         }
       }
       else
       {
-        RCLCPP_ERROR(LOGGER, "Kinematics solver could not be instantiated for joint group %s.", group.c_str());
+        RCLCPP_ERROR(logger_, "Kinematics solver could not be instantiated for joint group %s.", group.c_str());
       }
     }
     model_->setKinematicsAllocators(imap);

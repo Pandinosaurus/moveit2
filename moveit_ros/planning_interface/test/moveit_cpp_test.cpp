@@ -43,8 +43,8 @@
 #include <gtest/gtest.h>
 
 // Main class
-#include <moveit/moveit_cpp/moveit_cpp.h>
-#include <moveit/moveit_cpp/planning_component.h>
+#include <moveit/moveit_cpp/moveit_cpp.hpp>
+#include <moveit/moveit_cpp/planning_component.hpp>
 // Msgs
 #include <geometry_msgs/PointStamped.h>
 
@@ -105,7 +105,7 @@ TEST_F(MoveItCppTest, GetCurrentStateTest)
   auto robot_model = moveit_cpp_ptr->getRobotModel();
   auto robot_state = std::make_shared<moveit::core::RobotState>(robot_model);
   EXPECT_TRUE(moveit_cpp_ptr->getCurrentState(robot_state, 0.0));
-  // Make sure the Panda robot is in "ready" state which is loaded from fake_controller.yaml
+  // Make sure the Panda robot is in "ready" state which is loaded from yaml
   std::vector<double> joints_vals;
   robot_state->copyJointGroupPositions(PLANNING_GROUP, joints_vals);
   EXPECT_NEAR(joints_vals[0], 0.0, 0.001);     // panda_joint1
@@ -153,7 +153,7 @@ TEST_F(MoveItCppTest, TestSetStartStateFromRobotState)
   ASSERT_TRUE(static_cast<bool>(planning_component_ptr->plan()));
 }
 
-// Test settting the goal of the plan using a moveit::core::RobotState
+// Test setting the goal of the plan using a moveit::core::RobotState
 TEST_F(MoveItCppTest, TestSetGoalFromRobotState)
 {
   auto target_state = *(moveit_cpp_ptr->getCurrentState());

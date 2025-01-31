@@ -33,48 +33,109 @@
  *********************************************************************/
 
 /* Author: Ioan Sucan */
-#include <moveit/robot_model/robot_model.h>
-#include <moveit/robot_state/robot_state.h>
-#include <moveit/utils/robot_model_test_utils.h>
+#include <moveit/robot_model/robot_model.hpp>
+#include <moveit/robot_state/robot_state.hpp>
+#include <moveit/utils/robot_model_test_utils.hpp>
 #include <urdf_parser/urdf_parser.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <gtest/gtest.h>
 #include <sstream>
 #include <algorithm>
 #include <ctype.h>
 
-static bool sameStringIgnoringWS(const std::string& s1, const std::string& s2)
+namespace
 {
-  unsigned int i1 = 0;
-  unsigned int i2 = 0;
-  while (i1 < s1.size() && isspace(s1[i1]))
-    i1++;
-  while (i2 < s2.size() && isspace(s2[i2]))
-    i2++;
-  while (i1 < s1.size() && i2 < s2.size())
+constexpr double EPSILON{ 1.e-9 };
+
+// Helper to create an Eigen::VectorXd from an initializer list, e.g.:
+//  auto vector = makeVector({1.0, 2.0, 3.0});
+Eigen::VectorXd makeVector(const std::vector<double>& values)
+{
+  Eigen::VectorXd vector = Eigen::VectorXd::Zero(values.size());
+  for (std::size_t i = 0; i < values.size(); i++)
   {
-    if (i1 < s1.size() && i2 < s2.size())
-    {
-      if (s1[i1] != s2[i2])
-        return false;
-      i1++;
-      i2++;
-    }
-    while (i1 < s1.size() && isspace(s1[i1]))
-      i1++;
-    while (i2 < s2.size() && isspace(s2[i2]))
-      i2++;
+    vector[i] = values[i];
   }
-  return i1 == s1.size() && i2 == s2.size();
+  return vector;
 }
+
+// Checks the validity of state.getJacobian() at the given 'joint_values' and 'joint_velocities'.
+void checkJacobian(moveit::core::RobotState& state, const moveit::core::JointModelGroup& joint_model_group,
+                   const Eigen::VectorXd& joint_values, const Eigen::VectorXd& joint_velocities,
+                   const moveit::core::LinkModel* reference_link = nullptr)
+{
+  // Using the Jacobian, compute the Cartesian velocity vector at which the end-effector would move, with the given
+  // joint velocities.
+  state.setToDefaultValues();
+  state.setJointGroupPositions(&joint_model_group, joint_values);
+  state.updateLinkTransforms();
+
+  const moveit::core::JointModel* root_joint_model = joint_model_group.getJointModels().front();
+  const moveit::core::LinkModel* root_link_model = root_joint_model->getParentLinkModel();
+  const Eigen::Isometry3d root_pose_world = state.getGlobalLinkTransform(root_link_model).inverse();
+
+  if (!reference_link)
+  {
+    reference_link = joint_model_group.getLinkModels().back();
+  }
+  const Eigen::Isometry3d tip_pose_initial = root_pose_world * state.getGlobalLinkTransform(reference_link);
+  Eigen::MatrixXd jacobian;
+  state.getJacobian(&joint_model_group, reference_link, Eigen::Vector3d::Zero(), jacobian);
+
+  // Verify that only elements of the Jacobian contain values that correspond to joints that are being used based on the reference link.
+  const std::vector<const moveit::core::JointModel*>& joint_models = joint_model_group.getJointModels();
+  auto it = std::find_if(joint_models.begin(), joint_models.end(), [&](const moveit::core::JointModel* jm) {
+    return jm->getParentLinkModel() == reference_link;
+  });
+  if (it != joint_models.end())
+  {
+    std::size_t index = 0;
+    for (auto jt = joint_models.begin(); jt != it; ++jt)
+    {
+      index += (*jt)->getVariableCount();
+    }
+
+    EXPECT_TRUE(jacobian.block(0, index, jacobian.rows(), jacobian.cols() - index).isZero())
+        << "Jacobian contains non-zero values for joints that are not used based on the reference link "
+        << reference_link->getName() << ". This is the faulty Jacobian: " << '\n'
+        << jacobian << '\n'
+        << "The columns " << index << " to " << jacobian.cols() << " should be zero. Instead the values are: " << '\n'
+        << jacobian.block(0, index, jacobian.rows(), jacobian.cols() - index);
+  }
+
+  // Compute the Cartesian velocity vector using the Jacobian.
+  const Eigen::VectorXd cartesian_velocity = jacobian * joint_velocities;
+
+  // Compute the instantaneous displacement that the end-effector would achieve if the given joint
+  // velocities were applied for a small amount of time.
+  constexpr double time_step = 1e-5;
+  const Eigen::VectorXd delta_joint_angles = time_step * joint_velocities;
+  state.setJointGroupPositions(&joint_model_group, joint_values + delta_joint_angles);
+  state.updateLinkTransforms();
+  const Eigen::Isometry3d tip_pose_after_delta = root_pose_world * state.getGlobalLinkTransform(reference_link);
+  const Eigen::Vector3d displacement = tip_pose_after_delta.translation() - tip_pose_initial.translation();
+
+  // The Cartesian velocity vector obtained via the Jacobian should be aligned with the instantaneous robot motion, i.e.
+  // the angle between the vectors should be close to zero.
+  double angle = std::acos(displacement.dot(cartesian_velocity.head<3>()) /
+                           (displacement.norm() * cartesian_velocity.head<3>().norm()));
+  EXPECT_NEAR(angle, 0.0, 1e-05) << "Angle between Cartesian velocity and Cartesian displacement larger than expected. "
+                                    "Angle: "
+                                 << angle << ". displacement: " << displacement.transpose()
+                                 << ". Cartesian velocity: " << cartesian_velocity.head<3>().transpose() << '\n';
+}
+}  // namespace
+
 static void expect_near(const Eigen::MatrixXd& x, const Eigen::MatrixXd& y,
                         double eps = std::numeric_limits<double>::epsilon())
 {
   ASSERT_EQ(x.rows(), y.rows());
   ASSERT_EQ(x.cols(), y.cols());
   for (int r = 0; r < x.rows(); ++r)
+  {
     for (int c = 0; c < x.cols(); ++c)
-      EXPECT_NEAR(x(r, c), y(r, c), eps) << "(r,c) = (" << r << "," << c << ")";
+      EXPECT_NEAR(x(r, c), y(r, c), eps) << "(r,c) = (" << r << ',' << c << ')';
+  }
 }
 
 // clang-format off
@@ -100,16 +161,16 @@ TEST(Loading, SimpleRobot)
   EXPECT_EQ(new_state.getVariablePosition("base_joint/rot_w"), 1.0);
 
   EXPECT_EQ(std::string("myrobot"), model->getName());
-  EXPECT_EQ((unsigned int)7, new_state.getVariableCount());
+  EXPECT_EQ(7u, new_state.getVariableCount());
 
   const std::vector<moveit::core::LinkModel*>& links = model->getLinkModels();
-  EXPECT_EQ((unsigned int)1, links.size());
+  EXPECT_EQ(1u, links.size());
 
   const std::vector<moveit::core::JointModel*>& joints = model->getJointModels();
-  EXPECT_EQ((unsigned int)1, joints.size());
+  EXPECT_EQ(1u, joints.size());
 
   const std::vector<std::string>& pgroups = model->getJointModelGroupNames();
-  EXPECT_EQ((unsigned int)0, pgroups.size());
+  EXPECT_EQ(0u, pgroups.size());
 }
 
 TEST(LoadingAndFK, SimpleRobot)
@@ -143,12 +204,12 @@ TEST(LoadingAndFK, SimpleRobot)
   moveit::core::RobotModelPtr model = builder.build();
   moveit::core::RobotState state(model);
 
-  EXPECT_EQ((unsigned int)3, state.getVariableCount());
+  EXPECT_EQ(3u, state.getVariableCount());
 
   state.setToDefaultValues();
 
-  EXPECT_EQ((unsigned int)1, (unsigned int)model->getJointModelCount());
-  EXPECT_EQ((unsigned int)3, (unsigned int)model->getJointModels()[0]->getLocalVariableNames().size());
+  EXPECT_EQ(1u, static_cast<unsigned int>(model->getJointModelCount()));
+  EXPECT_EQ(3u, static_cast<unsigned int>(model->getJointModels()[0]->getLocalVariableNames().size()));
 
   std::map<std::string, double> joint_values;
   joint_values["base_joint/x"] = 10.0;
@@ -168,10 +229,8 @@ TEST(LoadingAndFK, SimpleRobot)
 
   state.setVariableAcceleration("base_joint/x", 0.0);
 
-  // making sure that values get copied
-  moveit::core::RobotState* new_state = new moveit::core::RobotState(state);
+  const auto new_state = std::make_unique<moveit::core::RobotState>(state);  // making sure that values get copied
   EXPECT_NEAR_TRACED(state.getGlobalLinkTransform("base_link").translation(), Eigen::Vector3d(10, 8, 0));
-  delete new_state;
 
   std::vector<double> jv(state.getVariableCount(), 0.0);
   jv[state.getRobotModel()->getVariableIndex("base_joint/x")] = 5.0;
@@ -187,184 +246,186 @@ class OneRobot : public testing::Test
 protected:
   void SetUp() override
   {
-    static const std::string MODEL2 =
-        "<?xml version=\"1.0\" ?>"
-        "<robot name=\"one_robot\">"
-        "<link name=\"base_link\">"
-        "  <inertial>"
-        "    <mass value=\"2.81\"/>"
-        "    <origin rpy=\"0 0 0\" xyz=\"0.0 0.0 .0\"/>"
-        "    <inertia ixx=\"0.1\" ixy=\"-0.2\" ixz=\"0.5\" iyy=\"-.09\" iyz=\"1\" izz=\"0.101\"/>"
-        "  </inertial>"
-        "  <collision name=\"my_collision\">"
-        "    <origin rpy=\"0 0 0\" xyz=\"0 0 0\"/>"
-        "    <geometry>"
-        "      <box size=\"1 2 1\" />"
-        "    </geometry>"
-        "  </collision>"
-        "  <visual>"
-        "    <origin rpy=\"0 0 0\" xyz=\"0.0 0 0\"/>"
-        "    <geometry>"
-        "      <box size=\"1 2 1\" />"
-        "    </geometry>"
-        "  </visual>"
-        "</link>"
-        "<joint name=\"joint_a\" type=\"continuous\">"
-        "   <axis xyz=\"0 0 1\"/>"
-        "   <parent link=\"base_link\"/>"
-        "   <child link=\"link_a\"/>"
-        "   <origin rpy=\" 0.0 0 0 \" xyz=\"0.0 0 0 \"/>"
-        "</joint>"
-        "<link name=\"link_a\">"
-        "  <inertial>"
-        "    <mass value=\"1.0\"/>"
-        "    <origin rpy=\"0 0 0\" xyz=\"0.0 0.0 .0\"/>"
-        "    <inertia ixx=\"0.1\" ixy=\"-0.2\" ixz=\"0.5\" iyy=\"-.09\" iyz=\"1\" izz=\"0.101\"/>"
-        "  </inertial>"
-        "  <collision>"
-        "    <origin rpy=\"0 0 0\" xyz=\"0 0 0\"/>"
-        "    <geometry>"
-        "      <box size=\"1 2 1\" />"
-        "    </geometry>"
-        "  </collision>"
-        "  <visual>"
-        "    <origin rpy=\"0 0 0\" xyz=\"0.0 0 0\"/>"
-        "    <geometry>"
-        "      <box size=\"1 2 1\" />"
-        "    </geometry>"
-        "  </visual>"
-        "</link>"
-        "<joint name=\"joint_b\" type=\"fixed\">"
-        "  <parent link=\"link_a\"/>"
-        "  <child link=\"link_b\"/>"
-        "  <origin rpy=\" 0.0 -0.42 0 \" xyz=\"0.0 0.5 0 \"/>"
-        "</joint>"
-        "<link name=\"link_b\">"
-        "  <inertial>"
-        "    <mass value=\"1.0\"/>"
-        "    <origin rpy=\"0 0 0\" xyz=\"0.0 0.0 .0\"/>"
-        "    <inertia ixx=\"0.1\" ixy=\"-0.2\" ixz=\"0.5\" iyy=\"-.09\" iyz=\"1\" izz=\"0.101\"/>"
-        "  </inertial>"
-        "  <collision>"
-        "    <origin rpy=\"0 0 0\" xyz=\"0 0 0\"/>"
-        "    <geometry>"
-        "      <box size=\"1 2 1\" />"
-        "    </geometry>"
-        "  </collision>"
-        "  <visual>"
-        "    <origin rpy=\"0 0 0\" xyz=\"0.0 0 0\"/>"
-        "    <geometry>"
-        "      <box size=\"1 2 1\" />"
-        "    </geometry>"
-        "  </visual>"
-        "</link>"
-        "  <joint name=\"joint_c\" type=\"prismatic\">"
-        "    <axis xyz=\"1 0 0\"/>"
-        "    <limit effort=\"100.0\" lower=\"0.0\" upper=\"0.09\" velocity=\"0.2\"/>"
-        "    <safety_controller k_position=\"20.0\" k_velocity=\"500.0\" soft_lower_limit=\"0.0\" "
-        "soft_upper_limit=\"0.089\"/>"
-        "    <parent link=\"link_b\"/>"
-        "    <child link=\"link_c\"/>"
-        "    <origin rpy=\" 0.0 0.42 0.0 \" xyz=\"0.0 -0.1 0 \"/>"
-        "  </joint>"
-        "<link name=\"link_c\">"
-        "  <inertial>"
-        "    <mass value=\"1.0\"/>"
-        "    <origin rpy=\"0 0 0\" xyz=\"0.0 0 .0\"/>"
-        "    <inertia ixx=\"0.1\" ixy=\"-0.2\" ixz=\"0.5\" iyy=\"-.09\" iyz=\"1\" izz=\"0.101\"/>"
-        "  </inertial>"
-        "  <collision>"
-        "    <origin rpy=\"0 0 0\" xyz=\"0 0 0\"/>"
-        "    <geometry>"
-        "      <box size=\"1 2 1\" />"
-        "    </geometry>"
-        "  </collision>"
-        "  <visual>"
-        "    <origin rpy=\"0 0 0\" xyz=\"0.0 0 0\"/>"
-        "    <geometry>"
-        "      <box size=\"1 2 1\" />"
-        "    </geometry>"
-        "  </visual>"
-        "</link>"
-        "  <joint name=\"mim_f\" type=\"prismatic\">"
-        "    <axis xyz=\"1 0 0\"/>"
-        "    <limit effort=\"100.0\" lower=\"0.0\" upper=\"0.19\" velocity=\"0.2\"/>"
-        "    <parent link=\"link_c\"/>"
-        "    <child link=\"link_d\"/>"
-        "    <origin rpy=\" 0.0 0.0 0.0 \" xyz=\"0.1 0.1 0 \"/>"
-        "    <mimic joint=\"joint_f\" multiplier=\"1.5\" offset=\"0.1\"/>"
-        "  </joint>"
-        "  <joint name=\"joint_f\" type=\"prismatic\">"
-        "    <axis xyz=\"1 0 0\"/>"
-        "    <limit effort=\"100.0\" lower=\"0.0\" upper=\"0.19\" velocity=\"0.2\"/>"
-        "    <parent link=\"link_d\"/>"
-        "    <child link=\"link_e\"/>"
-        "    <origin rpy=\" 0.0 0.0 0.0 \" xyz=\"0.1 0.1 0 \"/>"
-        "  </joint>"
-        "<link name=\"link_d\">"
-        "  <collision>"
-        "    <origin rpy=\"0 0 0\" xyz=\"0 0 0\"/>"
-        "    <geometry>"
-        "      <box size=\"1 2 1\" />"
-        "    </geometry>"
-        "  </collision>"
-        "  <visual>"
-        "    <origin rpy=\"0 1 0\" xyz=\"0 0.1 0\"/>"
-        "    <geometry>"
-        "      <box size=\"1 2 1\" />"
-        "    </geometry>"
-        "  </visual>"
-        "</link>"
-        "<link name=\"link_e\">"
-        "  <collision>"
-        "    <origin rpy=\"0 0 0\" xyz=\"0 0 0\"/>"
-        "    <geometry>"
-        "      <box size=\"1 2 1\" />"
-        "    </geometry>"
-        "  </collision>"
-        "  <visual>"
-        "    <origin rpy=\"0 1 0\" xyz=\"0 0.1 0\"/>"
-        "    <geometry>"
-        "      <box size=\"1 2 1\" />"
-        "    </geometry>"
-        "  </visual>"
-        "</link>"
-        "</robot>";
+    static const std::string MODEL2 = R"(
+      <?xml version="1.0" ?>
+      <robot name="one_robot">
+      <link name="base_link">
+        <inertial>
+          <mass value="2.81"/>
+          <origin rpy="0 0 0" xyz="0.0 0.0 .0"/>
+          <inertia ixx="0.1" ixy="-0.2" ixz="0.5" iyy="-.09" iyz="1" izz="0.101"/>
+        </inertial>
+        <collision name="my_collision">
+          <origin rpy="0 0 0" xyz="0 0 0"/>
+          <geometry>
+            <box size="1 2 1" />
+          </geometry>
+        </collision>
+        <visual>
+          <origin rpy="0 0 0" xyz="0.0 0 0"/>
+          <geometry>
+            <box size="1 2 1" />
+          </geometry>
+        </visual>
+      </link>
+      <joint name="joint_a" type="continuous">
+          <axis xyz="0 0 1"/>
+          <parent link="base_link"/>
+          <child link="link_a"/>
+          <origin rpy=" 0.0 0 0 " xyz="0.0 0 0 "/>
+      </joint>
+      <link name="link_a">
+        <inertial>
+          <mass value="1.0"/>
+          <origin rpy="0 0 0" xyz="0.0 0.0 .0"/>
+          <inertia ixx="0.1" ixy="-0.2" ixz="0.5" iyy="-.09" iyz="1" izz="0.101"/>
+        </inertial>
+        <collision>
+          <origin rpy="0 0 0" xyz="0 0 0"/>
+          <geometry>
+            <box size="1 2 1" />
+          </geometry>
+        </collision>
+        <visual>
+          <origin rpy="0 0 0" xyz="0.0 0 0"/>
+          <geometry>
+            <box size="1 2 1" />
+          </geometry>
+        </visual>
+      </link>
+      <joint name="joint_b" type="fixed">
+        <parent link="link_a"/>
+        <child link="link_b"/>
+        <origin rpy=" 0.0 -0.42 0 " xyz="0.0 0.5 0 "/>
+      </joint>
+      <link name="link_b">
+        <inertial>
+          <mass value="1.0"/>
+          <origin rpy="0 0 0" xyz="0.0 0.0 .0"/>
+          <inertia ixx="0.1" ixy="-0.2" ixz="0.5" iyy="-.09" iyz="1" izz="0.101"/>
+        </inertial>
+        <collision>
+          <origin rpy="0 0 0" xyz="0 0 0"/>
+          <geometry>
+            <box size="1 2 1" />
+          </geometry>
+        </collision>
+        <visual>
+          <origin rpy="0 0 0" xyz="0.0 0 0"/>
+          <geometry>
+            <box size="1 2 1" />
+          </geometry>
+        </visual>
+      </link>
+      <joint name="joint_c" type="prismatic">
+        <axis xyz="1 0 0"/>
+        <limit effort="100.0" lower="0.0" upper="0.09" velocity="0.2"/>
+        <safety_controller k_position="20.0" k_velocity="500.0" soft_lower_limit="0.0"
+    soft_upper_limit="0.089"/>
+        <parent link="link_b"/>
+        <child link="link_c"/>
+        <origin rpy=" 0.0 0.42 0.0 " xyz="0.0 -0.1 0 "/>
+      </joint>
+      <link name="link_c">
+        <inertial>
+          <mass value="1.0"/>
+          <origin rpy="0 0 0" xyz="0.0 0 .0"/>
+          <inertia ixx="0.1" ixy="-0.2" ixz="0.5" iyy="-.09" iyz="1" izz="0.101"/>
+        </inertial>
+        <collision>
+          <origin rpy="0 0 0" xyz="0 0 0"/>
+          <geometry>
+            <box size="1 2 1" />
+          </geometry>
+        </collision>
+        <visual>
+          <origin rpy="0 0 0" xyz="0.0 0 0"/>
+          <geometry>
+            <box size="1 2 1" />
+          </geometry>
+        </visual>
+      </link>
+      <joint name="mim_f" type="prismatic">
+        <axis xyz="1 0 0"/>
+        <limit effort="100.0" lower="0.0" upper="0.19" velocity="0.2"/>
+        <parent link="link_c"/>
+        <child link="link_d"/>
+        <origin rpy=" 0.0 0.0 0.0 " xyz="0.1 0.1 0 "/>
+        <mimic joint="joint_f" multiplier="1.5" offset="0.1"/>
+      </joint>
+      <joint name="joint_f" type="prismatic">
+        <axis xyz="1 0 0"/>
+        <limit effort="100.0" lower="0.0" upper="0.19" velocity="0.2"/>
+        <parent link="link_d"/>
+        <child link="link_e"/>
+        <origin rpy=" 0.0 0.0 0.0 " xyz="0.1 0.1 0 "/>
+      </joint>
+      <link name="link_d">
+        <collision>
+          <origin rpy="0 0 0" xyz="0 0 0"/>
+          <geometry>
+            <box size="1 2 1" />
+          </geometry>
+        </collision>
+        <visual>
+          <origin rpy="0 1 0" xyz="0 0.1 0"/>
+          <geometry>
+            <box size="1 2 1" />
+          </geometry>
+        </visual>
+      </link>
+      <link name="link_e">
+        <collision>
+          <origin rpy="0 0 0" xyz="0 0 0"/>
+          <geometry>
+            <box size="1 2 1" />
+          </geometry>
+        </collision>
+        <visual>
+          <origin rpy="0 1 0" xyz="0 0.1 0"/>
+          <geometry>
+            <box size="1 2 1" />
+          </geometry>
+        </visual>
+      </link>
+      </robot>
+    )";
 
-    static const std::string SMODEL2 =
-        "<?xml version=\"1.0\" ?>"
-        "<robot name=\"one_robot\">"
-        "<virtual_joint name=\"base_joint\" child_link=\"base_link\" parent_frame=\"odom_combined\" type=\"planar\"/>"
-        "<group name=\"base_from_joints\">"
-        "<joint name=\"base_joint\"/>"
-        "<joint name=\"joint_a\"/>"
-        "<joint name=\"joint_c\"/>"
-        "</group>"
-        "<group name=\"mim_joints\">"
-        "<joint name=\"joint_f\"/>"
-        "<joint name=\"mim_f\"/>"
-        "</group>"
-        "<group name=\"base_with_subgroups\">"
-        "<group name=\"base_from_base_to_tip\"/>"
-        "<joint name=\"joint_c\"/>"
-        "</group>"
-        "<group name=\"base_from_base_to_tip\">"
-        "<chain base_link=\"base_link\" tip_link=\"link_b\"/>"
-        "<joint name=\"base_joint\"/>"
-        "</group>"
-        "<group name=\"base_from_base_to_e\">"
-        "<chain base_link=\"base_link\" tip_link=\"link_e\"/>"
-        "<joint name=\"base_joint\"/>"
-        "</group>"
-        "<group name=\"base_with_bad_subgroups\">"
-        "<group name=\"error\"/>"
-        "</group>"
-        "</robot>";
+    static const std::string SMODEL2 = R"xml(
+      <?xml version="1.0" ?>
+      <robot name="one_robot">
+        <virtual_joint name="base_joint" child_link="base_link" parent_frame="odom_combined" type="planar"/>
+        <group name="base_from_joints">
+          <joint name="base_joint"/>
+          <joint name="joint_a"/>
+          <joint name="joint_c"/>
+        </group>
+        <group name="mim_joints">
+          <joint name="joint_f"/>
+          <joint name="mim_f"/>
+        </group>
+        <group name="base_with_subgroups">
+          <group name="base_from_base_to_tip"/>
+            <joint name="joint_c"/>
+          </group>
+          <group name="base_from_base_to_tip">
+            <chain base_link="base_link" tip_link="link_b"/>
+            <joint name="base_joint"/>
+          </group>
+          <group name="base_from_base_to_e">
+            <chain base_link="base_link" tip_link="link_e"/>
+            <joint name="base_joint"/>
+          </group>
+          <group name="base_with_bad_subgroups">
+            <group name="error"/>
+        </group>
+      </robot>
+      )xml";
 
     urdf::ModelInterfaceSharedPtr urdf_model = urdf::parseURDF(MODEL2);
-    srdf::ModelSharedPtr srdf_model(new srdf::Model());
+    auto srdf_model = std::make_shared<srdf::Model>();
     srdf_model->initString(*urdf_model, SMODEL2);
-    robot_model_.reset(new moveit::core::RobotModel(urdf_model, srdf_model));
+    robot_model_ = std::make_shared<moveit::core::RobotModel>(urdf_model, srdf_model);
   }
 
   void TearDown() override
@@ -374,6 +435,34 @@ protected:
 protected:
   moveit::core::RobotModelConstPtr robot_model_;
 };
+
+TEST_F(OneRobot, setToDefaultValues)
+{
+  moveit::core::RobotState state(robot_model_);
+  state.setToDefaultValues();
+
+  // Get default values for joint_a.
+  double joint_a_default_position = state.getVariablePosition("joint_a");
+  double joint_a_default_velocity = state.getVariableVelocity("joint_a");
+  double joint_a_default_acceleration = state.getVariableAcceleration("joint_a");
+
+  // Set joint_a to some values.
+  state.setVariablePosition("joint_a", 1.0);
+  state.setVariableVelocity("joint_a", 2.0);
+  state.setVariableAcceleration("joint_a", 3.0);
+
+  // Check that joint_a has the right values.
+  EXPECT_EQ(state.getVariablePosition("joint_a"), 1.0);
+  EXPECT_EQ(state.getVariableVelocity("joint_a"), 2.0);
+  EXPECT_EQ(state.getVariableAcceleration("joint_a"), 3.0);
+
+  // Set to default values.
+  // Check that joint_a is back to the default values.
+  state.setToDefaultValues();
+  EXPECT_EQ(state.getVariablePosition("joint_a"), joint_a_default_position);
+  EXPECT_EQ(state.getVariableVelocity("joint_a"), joint_a_default_velocity);
+  EXPECT_EQ(state.getVariableAcceleration("joint_a"), joint_a_default_acceleration);
+}
 
 TEST_F(OneRobot, FK)
 {
@@ -444,7 +533,7 @@ TEST_F(OneRobot, FK)
 
   moveit::core::RobotState state(model);
 
-  EXPECT_EQ((unsigned int)7, state.getVariableCount());
+  EXPECT_EQ(7u, state.getVariableCount());
 
   state.setToDefaultValues();
 
@@ -547,24 +636,628 @@ TEST_F(OneRobot, testPrintCurrentPositionWithJointLimits)
 
   state.setToDefaultValues();
 
-  std::cout << "\nVisual inspection should show NO joints out of bounds:" << std::endl;
+  std::cout << "\nVisual inspection should show NO joints out of bounds:\n";
   state.printStatePositionsWithJointLimits(joint_model_group);
 
-  std::cout << "\nVisual inspection should show ONE joint out of bounds:" << std::endl;
+  std::cout << "\nVisual inspection should show ONE joint out of bounds:\n";
   std::vector<double> single_joint(1);
   single_joint[0] = -1.0;
   state.setJointPositions("joint_c", single_joint);
   state.printStatePositionsWithJointLimits(joint_model_group);
 
-  std::cout << "\nVisual inspection should show TWO joint out of bounds:" << std::endl;
+  std::cout << "\nVisual inspection should show TWO joint out of bounds:\n";
   single_joint[0] = 1.0;
   state.setJointPositions("joint_f", single_joint);
   state.printStatePositionsWithJointLimits(joint_model_group);
 
-  std::cout << "\nVisual inspection should show ONE joint out of bounds:" << std::endl;
+  std::cout << "\nVisual inspection should show ONE joint out of bounds:\n";
   single_joint[0] = 0.19;
   state.setJointPositions("joint_f", single_joint);
   state.printStatePositionsWithJointLimits(joint_model_group);
+}
+
+TEST_F(OneRobot, testInterpolation)
+{
+  moveit::core::RobotState state_a(robot_model_);
+
+  // Interpolate with itself
+  state_a.setToDefaultValues();
+  moveit::core::RobotState state_b(state_a);
+  moveit::core::RobotState interpolated_state(state_a);
+  for (size_t i = 0; i <= 10; ++i)
+  {
+    state_a.interpolate(state_b, static_cast<double>(i) / 10., interpolated_state,
+                        robot_model_->getJointModelGroup("base_from_base_to_e"));
+    EXPECT_NEAR(state_a.distance(state_b), 0, EPSILON) << "Interpolation between identical states yielded a different "
+                                                          "state.";
+
+    for (const auto& link_name : robot_model_->getLinkModelNames())
+    {
+      EXPECT_FALSE(interpolated_state.getCollisionBodyTransform(link_name, 0).matrix().hasNaN()) << "Interpolation "
+                                                                                                    "between identical "
+                                                                                                    "states yielded "
+                                                                                                    "NaN value.";
+    }
+  }
+
+  // Some simple interpolation
+  std::map<std::string, double> joint_values;
+  joint_values["base_joint/x"] = 1.0;
+  joint_values["base_joint/y"] = 1.0;
+  state_a.setVariablePositions(joint_values);
+  joint_values["base_joint/x"] = 0.0;
+  joint_values["base_joint/y"] = 2.0;
+  state_b.setVariablePositions(joint_values);
+  EXPECT_NEAR(3 * std::sqrt(2), state_a.distance(state_b), EPSILON) << "Simple interpolation of base_joint failed.";
+
+  state_a.interpolate(state_b, 0.5, interpolated_state, robot_model_->getJointModelGroup("base_from_base_to_e"));
+  EXPECT_NEAR(0., state_a.distance(interpolated_state) - state_b.distance(interpolated_state), EPSILON) << "Simple "
+                                                                                                           "interpolati"
+                                                                                                           "on of "
+                                                                                                           "base_joint "
+                                                                                                           "failed.";
+  EXPECT_NEAR(0.5, interpolated_state.getVariablePosition("base_joint/x"), EPSILON) << "Simple interpolation of "
+                                                                                       "base_joint failed.";
+  EXPECT_NEAR(1.5, interpolated_state.getVariablePosition("base_joint/y"), EPSILON) << "Simple interpolation of "
+                                                                                       "base_joint failed.";
+  state_a.interpolate(state_b, 0.1, interpolated_state, robot_model_->getJointModelGroup("base_from_base_to_e"));
+  EXPECT_NEAR(0.9, interpolated_state.getVariablePosition("base_joint/x"), EPSILON) << "Simple interpolation of "
+                                                                                       "base_joint failed.";
+  EXPECT_NEAR(1.1, interpolated_state.getVariablePosition("base_joint/y"), EPSILON) << "Simple interpolation of "
+                                                                                       "base_joint failed.";
+
+  // Interpolate all the joints
+  joint_values["base_joint/x"] = 0.0;
+  joint_values["base_joint/y"] = 20.0;
+  joint_values["base_joint/theta"] = 3 * M_PI / 4;
+  joint_values["joint_a"] = -4 * M_PI / 5;
+  joint_values["joint_c"] = 0.0;
+  joint_values["joint_f"] = 1.0;
+  state_a.setVariablePositions(joint_values);
+
+  joint_values["base_joint/x"] = 10.0;
+  joint_values["base_joint/y"] = 0.0;
+  joint_values["base_joint/theta"] = -3 * M_PI / 4;
+  joint_values["joint_a"] = 4 * M_PI / 5;
+  joint_values["joint_c"] = 0.07;
+  joint_values["joint_f"] = 0.0;
+  state_b.setVariablePositions(joint_values);
+
+  for (size_t i = 0; i <= 5; ++i)
+  {
+    double t = static_cast<double>(i) / 5.;
+    state_a.interpolate(state_b, t, interpolated_state, robot_model_->getJointModelGroup("base_from_base_to_e"));
+    EXPECT_NEAR(10.0 * t, interpolated_state.getVariablePosition("base_joint/x"), EPSILON) << "Base joint "
+                                                                                              "interpolation failed.";
+    EXPECT_NEAR(20.0 * (1 - t), interpolated_state.getVariablePosition("base_joint/y"), EPSILON) << "Base joint "
+                                                                                                    "interpolation "
+                                                                                                    "failed.";
+    if (t < 0.5)
+    {
+      EXPECT_NEAR(3 * M_PI / 4 + (M_PI / 2) * t, interpolated_state.getVariablePosition("base_joint/theta"), EPSILON)
+          << "Base joint theta interpolation failed.";
+      EXPECT_NEAR(-4 * M_PI / 5 - (2 * M_PI / 5) * t, interpolated_state.getVariablePosition("joint_a"), EPSILON)
+          << "Continuous joint interpolation failed.";
+    }
+    else
+    {
+      EXPECT_NEAR(-3 * M_PI / 4 - (M_PI / 2) * (1 - t), interpolated_state.getVariablePosition("base_joint/theta"),
+                  EPSILON)
+          << "Base joint theta interpolation failed.";
+      EXPECT_NEAR(4 * M_PI / 5 + (2 * M_PI / 5) * (1 - t), interpolated_state.getVariablePosition("joint_a"), EPSILON)
+          << "Continuous joint interpolation failed.";
+    }
+    EXPECT_NEAR(0.07 * t, interpolated_state.getVariablePosition("joint_c"), EPSILON) << "Interpolation of joint_c "
+                                                                                         "failed.";
+    EXPECT_NEAR(1 - t, interpolated_state.getVariablePosition("joint_f"), EPSILON) << "Interpolation of joint_f "
+                                                                                      "failed.";
+    EXPECT_NEAR(1.5 * (1 - t) + 0.1, interpolated_state.getVariablePosition("mim_f"), EPSILON) << "Interpolation of "
+                                                                                                  "mimic joint mim_f "
+                                                                                                  "failed.";
+  }
+
+  bool nan_exception = false;
+  try
+  {
+    state_a.interpolate(state_b, 1. / 0., interpolated_state, robot_model_->getJointModelGroup("base_from_base_to_e"));
+  }
+  catch (std::exception& e)
+  {
+    std::cout << "Caught expected exception: " << e.what() << '\n';
+    nan_exception = true;
+  }
+  EXPECT_TRUE(nan_exception) << "NaN interpolation parameter did not create expected exception.";
+}
+
+TEST_F(OneRobot, rigidlyConnectedParent)
+{
+  // link_e is its own rigidly-connected parent
+  const moveit::core::LinkModel* link_e{ robot_model_->getLinkModel("link_e") };
+  EXPECT_EQ(robot_model_->getRigidlyConnectedParentLinkModel(link_e), link_e);
+
+  // link_b is rigidly connected to its parent link_a
+  const moveit::core::LinkModel* link_a{ robot_model_->getLinkModel("link_a") };
+  const moveit::core::LinkModel* link_b{ robot_model_->getLinkModel("link_b") };
+  EXPECT_EQ(robot_model_->getRigidlyConnectedParentLinkModel(link_b), link_a);
+
+  moveit::core::RobotState state(robot_model_);
+  state.setToDefaultValues();
+  state.updateLinkTransforms();
+
+  EXPECT_EQ(state.getRigidlyConnectedParentLinkModel("link_b"), link_a);
+
+  // attach "object" with "subframe" to link_b
+  state.attachBody(std::make_unique<moveit::core::AttachedBody>(
+      link_b, "object", Eigen::Isometry3d::Identity(), std::vector<shapes::ShapeConstPtr>{},
+      EigenSTL::vector_Isometry3d{}, std::set<std::string>{}, trajectory_msgs::msg::JointTrajectory{},
+      moveit::core::FixedTransformsMap{ { "subframe", Eigen::Isometry3d::Identity() } }));
+
+  // RobotState's version should resolve these too
+  EXPECT_EQ(link_a, state.getRigidlyConnectedParentLinkModel("object"));
+  EXPECT_EQ(link_a, state.getRigidlyConnectedParentLinkModel("object/subframe"));
+
+  // test failure cases
+  EXPECT_EQ(nullptr, state.getRigidlyConnectedParentLinkModel("no_object"));
+  EXPECT_EQ(nullptr, state.getRigidlyConnectedParentLinkModel("object/no_subframe"));
+  EXPECT_EQ(nullptr, state.getRigidlyConnectedParentLinkModel(""));
+  EXPECT_EQ(nullptr, state.getRigidlyConnectedParentLinkModel("object/"));
+  EXPECT_EQ(nullptr, state.getRigidlyConnectedParentLinkModel("/"));
+}
+
+TEST(getJacobian, RevoluteJoints)
+{
+  // Robot URDF with four revolute joints.
+  constexpr char robot_urdf[] = R"(
+      <?xml version="1.0" ?>
+      <robot name="one_robot">
+        <link name="base_link"/>
+        <joint name="joint_a_revolute" type="revolute">
+            <axis xyz="0 0 1"/>
+            <parent link="base_link"/>
+            <child link="link_a"/>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_a"/>
+        <joint name="joint_b_revolute" type="revolute">
+          <axis xyz="0 0 1"/>
+          <parent link="link_a"/>
+          <child link="link_b"/>
+          <origin rpy="0 0 0" xyz="0.0 0.5 0"/>
+          <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_b"/>
+        <joint name="joint_c_revolute" type="revolute">
+          <axis xyz="0 1 0"/>
+          <parent link="link_b"/>
+          <child link="link_c"/>
+          <origin rpy="0 0 0" xyz="0.2 0.2 0"/>
+          <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_c"/>
+        <joint name="joint_d_revolute" type="revolute">
+          <axis xyz="1 0 0"/>
+          <parent link="link_c"/>
+          <child link="link_d"/>
+          <origin rpy="0 0 0" xyz="0.0 0.2 0.4"/>
+          <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_d"/>
+      </robot>
+    )";
+
+  constexpr char robot_srdf[] = R"xml(
+      <?xml version="1.0" ?>
+      <robot name="one_robot">
+        <group name="base_to_tip">
+          <joint name="joint_a_revolute"/>
+          <joint name="joint_b_revolute"/>
+          <joint name="joint_c_revolute"/>
+          <joint name="joint_d_revolute"/>
+        </group>
+      </robot>
+      )xml";
+
+  const urdf::ModelInterfaceSharedPtr urdf_model = urdf::parseURDF(robot_urdf);
+  ASSERT_TRUE(urdf_model);
+  const auto srdf_model = std::make_shared<srdf::Model>();
+  ASSERT_TRUE(srdf_model->initString(*urdf_model, robot_srdf));
+  const auto robot_model = std::make_shared<moveit::core::RobotModel>(urdf_model, srdf_model);
+
+  moveit::core::RobotState state(robot_model);
+  const moveit::core::JointModelGroup* jmg = state.getJointModelGroup("base_to_tip");
+
+  // Some made-up numbers, at zero and non-zero robot configurations.
+  checkJacobian(state, *jmg, makeVector({ 0.0, 0.0, 0.0, 0.0 }), makeVector({ 0.1, 0.2, 0.3, 0.4 }));
+  checkJacobian(state, *jmg, makeVector({ 0.1, 0.2, 0.3, 0.4 }), makeVector({ 0.5, 0.3, 0.2, 0.1 }));
+}
+
+TEST(getJacobian, RevoluteJointsButDifferentLink)
+{
+  // Robot URDF with four revolute joints.
+  constexpr char robot_urdf[] = R"(
+      <?xml version="1.0" ?>
+      <robot name="one_robot">
+        <link name="base_link"/>
+        <joint name="joint_a_revolute" type="revolute">
+            <axis xyz="0 0 1"/>
+            <parent link="base_link"/>
+            <child link="link_a"/>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_a"/>
+        <joint name="joint_b_revolute" type="revolute">
+          <axis xyz="0 0 1"/>
+          <parent link="link_a"/>
+          <child link="link_b"/>
+          <origin rpy="0 0 0" xyz="0.0 0.5 0"/>
+          <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_b"/>
+        <joint name="joint_c_revolute" type="revolute">
+          <axis xyz="0 1 0"/>
+          <parent link="link_b"/>
+          <child link="link_c"/>
+          <origin rpy="0 0 0" xyz="0.2 0.2 0"/>
+          <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_c"/>
+        <joint name="joint_d_revolute" type="revolute">
+          <axis xyz="1 0 0"/>
+          <parent link="link_c"/>
+          <child link="link_d"/>
+          <origin rpy="0 0 0" xyz="0.0 0.2 0.4"/>
+          <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_d"/>
+      </robot>
+    )";
+
+  constexpr char robot_srdf[] = R"xml(
+      <?xml version="1.0" ?>
+      <robot name="one_robot">
+        <group name="base_to_tip">
+          <joint name="joint_a_revolute"/>
+          <joint name="joint_b_revolute"/>
+          <joint name="joint_c_revolute"/>
+          <joint name="joint_d_revolute"/>
+        </group>
+      </robot>
+      )xml";
+
+  const urdf::ModelInterfaceSharedPtr urdf_model = urdf::parseURDF(robot_urdf);
+  ASSERT_TRUE(urdf_model);
+  const auto srdf_model = std::make_shared<srdf::Model>();
+  ASSERT_TRUE(srdf_model->initString(*urdf_model, robot_srdf));
+  const auto robot_model = std::make_shared<moveit::core::RobotModel>(urdf_model, srdf_model);
+
+  moveit::core::RobotState state(robot_model);
+  const moveit::core::JointModelGroup* jmg = state.getJointModelGroup("base_to_tip");
+
+  // Some made-up numbers, at zero and non-zero robot configurations.
+  checkJacobian(state, *jmg, makeVector({ 0.0, 0.0, 0.0, 0.0 }), makeVector({ 0.1, 0.2, 0.3, 0.4 }),
+                state.getLinkModel("link_c"));
+  checkJacobian(state, *jmg, makeVector({ 0.1, 0.2, 0.3, 0.4 }), makeVector({ 0.5, 0.3, 0.2, 0.1 }),
+                state.getLinkModel("link_c"));
+}
+
+TEST(getJacobian, RevoluteAndPrismaticJoints)
+{
+  // Robot URDF with three revolute joints and one prismatic joint.
+  constexpr char robot_urdf[] = R"(
+      <?xml version="1.0" ?>
+      <robot name="one_robot">
+        <link name="base_link"/>
+        <joint name="joint_a_revolute" type="revolute">
+            <axis xyz="0 0 1"/>
+            <parent link="base_link"/>
+            <child link="link_a"/>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_a"/>
+        <joint name="joint_b_revolute" type="revolute">
+          <axis xyz="0 0 1"/>
+          <parent link="link_a"/>
+          <child link="link_b"/>
+          <origin rpy="0 0 0" xyz="0.0 0.5 0"/>
+          <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_b"/>
+        <joint name="joint_c_prismatic" type="prismatic">
+          <axis xyz="0 1 0"/>
+          <parent link="link_b"/>
+          <child link="link_c"/>
+          <origin rpy="0 0 0" xyz="0.2 0.2 0"/>
+          <limit effort="100.0" lower="-1.0" upper="1.0" velocity="0.2"/>
+        </joint>
+        <link name="link_c"/>
+        <joint name="joint_d_revolute" type="revolute">
+          <axis xyz="1 0 0"/>
+          <parent link="link_c"/>
+          <child link="link_d"/>
+          <origin rpy="0 0 0" xyz="0.0 0.2 0.4"/>
+          <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_d"/>
+      </robot>
+    )";
+
+  constexpr char robot_srdf[] = R"xml(
+      <?xml version="1.0" ?>
+      <robot name="one_robot">
+        <group name="base_to_tip">
+          <joint name="joint_a_revolute"/>
+          <joint name="joint_b_revolute"/>
+          <joint name="joint_c_prismatic"/>
+          <joint name="joint_d_revolute"/>
+        </group>
+      </robot>
+      )xml";
+
+  const urdf::ModelInterfaceSharedPtr urdf_model = urdf::parseURDF(robot_urdf);
+  ASSERT_TRUE(urdf_model);
+  const auto srdf_model = std::make_shared<srdf::Model>();
+  ASSERT_TRUE(srdf_model->initString(*urdf_model, robot_srdf));
+  const auto robot_model = std::make_shared<moveit::core::RobotModel>(urdf_model, srdf_model);
+
+  moveit::core::RobotState state(robot_model);
+  const moveit::core::JointModelGroup* jmg = state.getJointModelGroup("base_to_tip");
+
+  // Some made-up numbers, at zero and non-zero robot configurations.
+  checkJacobian(state, *jmg, makeVector({ 0.0, 0.0, 0.0, 0.0 }), makeVector({ 0.1, 0.2, 0.3, 0.4 }));
+  checkJacobian(state, *jmg, makeVector({ 0.1, 0.2, 0.3, 0.4 }), makeVector({ 0.5, 0.3, 0.2, 0.1 }));
+}
+
+TEST(getJacobian, RevoluteAndFixedJoints)
+{
+  // Robot URDF with two revolute joints and two fixed joints.
+  constexpr char robot_urdf[] = R"(
+      <?xml version="1.0" ?>
+      <robot name="one_robot">
+        <link name="base_link"/>
+        <joint name="joint_a_revolute" type="revolute">
+            <axis xyz="0 0 1"/>
+            <parent link="base_link"/>
+            <child link="link_a"/>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_a"/>
+        <joint name="joint_b_fixed" type="fixed">
+          <parent link="link_a"/>
+          <child link="link_b"/>
+        </joint>
+        <link name="link_b"/>
+        <joint name="joint_c_fixed" type="fixed">
+          <parent link="link_b"/>
+          <child link="link_c"/>
+        </joint>
+        <link name="link_c"/>
+        <joint name="joint_d_revolute" type="revolute">
+          <axis xyz="1 0 0"/>
+          <parent link="link_c"/>
+          <child link="link_d"/>
+          <origin rpy="0 0 0" xyz="0.0 0.2 0.4"/>
+          <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_d"/>
+      </robot>
+    )";
+
+  constexpr char robot_srdf[] = R"xml(
+      <?xml version="1.0" ?>
+      <robot name="one_robot">
+        <group name="base_to_tip">
+          <joint name="joint_a_revolute"/>
+          <joint name="joint_b_fixed"/>
+          <joint name="joint_c_fixed"/>
+          <joint name="joint_d_revolute"/>
+        </group>
+      </robot>
+      )xml";
+
+  const urdf::ModelInterfaceSharedPtr urdf_model = urdf::parseURDF(robot_urdf);
+  ASSERT_TRUE(urdf_model);
+  const auto srdf_model = std::make_shared<srdf::Model>();
+  ASSERT_TRUE(srdf_model->initString(*urdf_model, robot_srdf));
+  const auto robot_model = std::make_shared<moveit::core::RobotModel>(urdf_model, srdf_model);
+
+  moveit::core::RobotState state(robot_model);
+  const moveit::core::JointModelGroup* jmg = state.getJointModelGroup("base_to_tip");
+
+  // Some made-up numbers, at zero and non-zero robot configurations.
+  checkJacobian(state, *jmg, makeVector({ 0.0, 0.0 }), makeVector({ 0.1, 0.4 }));
+  checkJacobian(state, *jmg, makeVector({ 0.1, 0.4 }), makeVector({ 0.5, 0.1 }));
+}
+
+TEST(getJacobian, RevolutePlanarAndPrismaticJoints)
+{
+  // Robot URDF with two revolute joints, one planar joint and one prismatic.
+  constexpr char robot_urdf[] = R"(
+      <?xml version="1.0" ?>
+      <robot name="one_robot">
+        <link name="base_link"/>
+        <joint name="joint_a_planar" type="planar">
+            <axis xyz="0 0 1"/>
+            <parent link="base_link"/>
+            <child link="link_a"/>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <limit effort="100.0" lower="-1.0" upper="1.0" velocity="0.2"/>
+        </joint>
+        <link name="link_a"/>
+        <joint name="joint_b_revolute" type="revolute">
+          <axis xyz="0 0 1"/>
+          <parent link="link_a"/>
+          <child link="link_b"/>
+          <origin rpy="0 0 0" xyz="0.0 0.5 0"/>
+          <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_b"/>
+        <joint name="joint_c_prismatic" type="prismatic">
+          <axis xyz="0 1 0"/>
+          <parent link="link_b"/>
+          <child link="link_c"/>
+          <origin rpy="0 0 0" xyz="0.2 0.2 0"/>
+          <limit effort="100.0" lower="-1.0" upper="1.0" velocity="0.2"/>
+        </joint>
+        <link name="link_c"/>
+        <joint name="joint_d_revolute" type="revolute">
+          <axis xyz="1 0 0"/>
+          <parent link="link_c"/>
+          <child link="link_d"/>
+          <origin rpy="0 0 0" xyz="0.0 0.2 0.4"/>
+          <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_d"/>
+      </robot>
+    )";
+
+  constexpr char robot_srdf[] = R"xml(
+      <?xml version="1.0" ?>
+      <robot name="one_robot">
+        <group name="base_to_tip">
+          <joint name="joint_a_planar"/>
+          <joint name="joint_b_revolute"/>
+          <joint name="joint_c_prismatic"/>
+          <joint name="joint_d_revolute"/>
+        </group>
+      </robot>
+      )xml";
+
+  const urdf::ModelInterfaceSharedPtr urdf_model = urdf::parseURDF(robot_urdf);
+  ASSERT_TRUE(urdf_model);
+  const auto srdf_model = std::make_shared<srdf::Model>();
+  ASSERT_TRUE(srdf_model->initString(*urdf_model, robot_srdf));
+  const auto robot_model = std::make_shared<moveit::core::RobotModel>(urdf_model, srdf_model);
+
+  moveit::core::RobotState state(robot_model);
+  const moveit::core::JointModelGroup* jmg = state.getJointModelGroup("base_to_tip");
+
+  checkJacobian(state, *jmg, makeVector({ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 }),
+                makeVector({ 0.2, 0.05, 0.1, 0.2, 0.3, 0.4 }));
+}
+
+TEST(getJacobian, GroupNotAtOrigin)
+{
+  // URDF with a 3 DOF robot not at the URDF origin.
+  constexpr char robot_urdf[] = R"(
+      <?xml version="1.0" ?>
+      <robot name="one_robot">
+        <link name="origin"/>
+        <joint name="fixed_offset" type="fixed">
+            <parent link="origin"/>
+            <child link="link_a"/>
+            <origin rpy="0 0 1.5707" xyz="0.0 0.0 0.0"/>
+        </joint>
+        <link name="link_a"/>
+        <joint name="joint_a_revolute" type="revolute">
+          <axis xyz="1 0 0"/>
+          <parent link="link_a"/>
+          <child link="link_b"/>
+          <origin rpy="0 0 0" xyz="0.0 0.2 0.4"/>
+          <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_b"/>
+        <joint name="joint_b_revolute" type="revolute">
+          <axis xyz="1 0 0"/>
+          <parent link="link_b"/>
+          <child link="link_c"/>
+          <origin rpy="0 0 0" xyz="0.0 0.2 0.4"/>
+          <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_c"/>
+        <joint name="joint_c_revolute" type="revolute">
+          <axis xyz="1 0 0"/>
+          <parent link="link_c"/>
+          <child link="link_d"/>
+          <origin rpy="0 0 0" xyz="0.0 0.2 0.4"/>
+          <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_d"/>
+      </robot>
+    )";
+
+  constexpr char robot_srdf[] = R"xml(
+      <?xml version="1.0" ?>
+      <robot name="one_robot">
+        <group name="base_to_tip">
+          <joint name="joint_a_revolute"/>
+          <joint name="joint_b_revolute"/>
+          <joint name="joint_c_revolute"/>
+        </group>
+      </robot>
+      )xml";
+
+  const urdf::ModelInterfaceSharedPtr urdf_model = urdf::parseURDF(robot_urdf);
+  ASSERT_TRUE(urdf_model);
+  const auto srdf_model = std::make_shared<srdf::Model>();
+  ASSERT_TRUE(srdf_model->initString(*urdf_model, robot_srdf));
+  const auto robot_model = std::make_shared<moveit::core::RobotModel>(urdf_model, srdf_model);
+
+  moveit::core::RobotState state(robot_model);
+  const moveit::core::JointModelGroup* jmg = state.getJointModelGroup("base_to_tip");
+
+  // Some made-up numbers, at zero and non-zero robot configurations.
+  checkJacobian(state, *jmg, makeVector({ 0.0, 0.0, 0.0 }), makeVector({ 0.1, 0.4, 0.2 }));
+  checkJacobian(state, *jmg, makeVector({ 0.1, 0.4, 0.3 }), makeVector({ 0.5, 0.1, 0.2 }));
+}
+
+TEST(getJointPositions, getFixedJointValue)
+{
+  // Robot URDF with two revolute joints and a final fixed joint.
+  // Trying to get the value of the fixed joint should work and return nullptr.
+  constexpr char robot_urdf[] = R"(
+      <?xml version="1.0" ?>
+      <robot name="one_robot">
+        <link name="base_link"/>
+        <joint name="joint_a_revolute" type="revolute">
+            <axis xyz="0 0 1"/>
+            <parent link="base_link"/>
+            <child link="link_a"/>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_a"/>
+        <joint name="joint_b_revolute" type="revolute">
+          <axis xyz="0 0 1"/>
+            <parent link="link_a"/>
+            <child link="link_b"/>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <limit effort="100.0" lower="-3.14" upper="3.14" velocity="0.2"/>
+        </joint>
+        <link name="link_b"/>
+        <joint name="joint_c_fixed" type="fixed">
+          <parent link="link_b"/>
+          <child link="link_c"/>
+        </joint>
+        <link name="link_c"/>
+      </robot>
+    )";
+
+  constexpr char robot_srdf[] = R"xml(
+      <?xml version="1.0" ?>
+      <robot name="one_robot">
+        <group name="base_to_tip">
+          <joint name="joint_a_revolute"/>
+          <joint name="joint_b_revolute"/>
+          <joint name="joint_c_fixed"/>
+        </group>
+      </robot>
+      )xml";
+
+  const urdf::ModelInterfaceSharedPtr urdf_model = urdf::parseURDF(robot_urdf);
+  ASSERT_TRUE(urdf_model);
+  const auto srdf_model = std::make_shared<srdf::Model>();
+  ASSERT_TRUE(srdf_model->initString(*urdf_model, robot_srdf));
+  const auto robot_model = std::make_shared<moveit::core::RobotModel>(urdf_model, srdf_model);
+
+  // Getting the value of the last fixed joint should return nullptr, since it doesn't have an active variable.
+  moveit::core::RobotState state(robot_model);
+  state.setToDefaultValues();
+  const double* joint_value = state.getJointPositions("joint_c_fixed");
+  ASSERT_EQ(joint_value, nullptr);
 }
 
 int main(int argc, char** argv)

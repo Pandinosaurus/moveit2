@@ -1,4 +1,4 @@
-#! /usr/bin/env python
+#! /usr/bin/env python3
 from __future__ import print_function
 
 """
@@ -63,6 +63,7 @@ except ImportError:
     print(
         "Failed to import ament_index_python. No ROS2 environment available? Trying without."
     )
+
     # define stubs
     class PackageNotFoundError(Exception):
         pass
@@ -180,6 +181,19 @@ def xmlElement(name, text=None, **attributes):
     return e
 
 
+def create_parameter_dict():
+    parameter_dict = {
+        "ikfast_kinematics": {
+            "link_prefix": {
+                "default_value": "",
+                "type": "string",
+                "description": "prefix added to tip- and baseframe to allow different namespaces or multi-robot setups",
+            }
+        }
+    }
+    return parameter_dict
+
+
 def create_ikfast_package(args):
     try:
         setattr(
@@ -219,10 +233,20 @@ def create_ikfast_package(args):
             xmlElement("maintainer", email="%s@todo.todo" % user_name, text=user_name)
         )
         root.append(xmlElement("buildtool_depend", text="ament_cmake"))
+        export = xmlElement("export")
+        export.append(xmlElement("build_type", text="ament_cmake"))
+        root.append(export)
         etree.ElementTree(root).write(
             pkg_xml_path, xml_declaration=True, pretty_print=True, encoding="UTF-8"
         )
         print("Created package.xml at: '%s'" % pkg_xml_path)
+
+    # Create parameter YAML in src folder
+    parameters_yaml_path = src_path + "ikfast_kinematics_parameters.yaml"
+    if not os.path.exists(parameters_yaml_path):
+        print("Create parameters.yaml at: '%s'" % parameters_yaml_path)
+        with open(parameters_yaml_path, "w") as file:
+            documents = yaml.dump(create_parameter_dict(), file)
 
 
 def find_template_dir():
@@ -301,7 +325,7 @@ def update_ikfast_package(args):
 
     # Create plugin definition .xml file
     ik_library_name = args.namespace + "_moveit_ikfast_plugin"
-    plugin_def = etree.Element("library", path="lib/lib" + ik_library_name)
+    plugin_def = etree.Element("library", path=ik_library_name)
     setattr(args, "plugin_name", args.namespace + "/IKFastKinematicsPlugin")
     cl = etree.SubElement(
         plugin_def,

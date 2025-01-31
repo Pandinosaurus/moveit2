@@ -35,17 +35,19 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/exceptions/exceptions.h>
-#include <moveit/robot_model/joint_model.h>
-#include <moveit/robot_model/link_model.h>
+#include <moveit/exceptions/exceptions.hpp>
+#include <moveit/robot_model/joint_model.hpp>
+#include <moveit/robot_model/link_model.hpp>
 #include <algorithm>
 
 namespace moveit
 {
 namespace core
 {
-JointModel::JointModel(const std::string& name)
+JointModel::JointModel(const std::string& name, size_t joint_index, size_t first_variable_index)
   : name_(name)
+  , joint_index_(joint_index)
+  , first_variable_index_(first_variable_index)
   , type_(UNKNOWN)
   , parent_link_model_(nullptr)
   , child_link_model_(nullptr)
@@ -54,8 +56,6 @@ JointModel::JointModel(const std::string& name)
   , mimic_offset_(0.0)
   , passive_(false)
   , distance_factor_(1.0)
-  , first_variable_index_(-1)
-  , joint_index_(-1)
 {
 }
 
@@ -66,7 +66,7 @@ std::string JointModel::getTypeName() const
   switch (type_)
   {
     case UNKNOWN:
-      return "Unkown";
+      return "Unknown";
     case REVOLUTE:
       return "Revolute";
     case PRISMATIC:
@@ -78,11 +78,11 @@ std::string JointModel::getTypeName() const
     case FIXED:
       return "Fixed";
     default:
-      return "[Unkown]";
+      return "[Unknown]";
   }
 }
 
-int JointModel::getLocalVariableIndex(const std::string& variable) const
+size_t JointModel::getLocalVariableIndex(const std::string& variable) const
 {
   VariableIndexMap::const_iterator it = variable_index_map_.find(variable);
   if (it == variable_index_map_.end())
@@ -90,7 +90,7 @@ int JointModel::getLocalVariableIndex(const std::string& variable) const
   return it->second;
 }
 
-bool JointModel::harmonizePosition(double* values, const Bounds& other_bounds) const
+bool JointModel::harmonizePosition(double* /*values*/, const Bounds& /*other_bounds*/) const
 {
   return false;
 }
@@ -99,6 +99,7 @@ bool JointModel::enforceVelocityBounds(double* values, const Bounds& other_bound
 {
   bool change = false;
   for (std::size_t i = 0; i < other_bounds.size(); ++i)
+  {
     if (other_bounds[i].max_velocity_ < values[i])
     {
       values[i] = other_bounds[i].max_velocity_;
@@ -109,16 +110,67 @@ bool JointModel::enforceVelocityBounds(double* values, const Bounds& other_bound
       values[i] = other_bounds[i].min_velocity_;
       change = true;
     }
+  }
   return change;
 }
 
 bool JointModel::satisfiesVelocityBounds(const double* values, const Bounds& other_bounds, double margin) const
 {
   for (std::size_t i = 0; i < other_bounds.size(); ++i)
+  {
+    if (!other_bounds[i].velocity_bounded_)
+    {
+      continue;
+    }
     if (other_bounds[i].max_velocity_ + margin < values[i])
+    {
       return false;
+    }
     else if (other_bounds[i].min_velocity_ - margin > values[i])
+    {
       return false;
+    }
+  }
+  return true;
+}
+
+bool JointModel::satisfiesAccelerationBounds(const double* values, const Bounds& other_bounds, double margin) const
+{
+  for (std::size_t i = 0; i < other_bounds.size(); ++i)
+  {
+    if (!other_bounds[i].acceleration_bounded_)
+    {
+      continue;
+    }
+    if (other_bounds[i].max_acceleration_ + margin < values[i])
+    {
+      return false;
+    }
+    else if (other_bounds[i].min_acceleration_ - margin > values[i])
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool JointModel::satisfiesJerkBounds(const double* values, const Bounds& other_bounds, double margin) const
+{
+  for (std::size_t i = 0; i < other_bounds.size(); ++i)
+  {
+    if (!other_bounds[i].jerk_bounded_)
+    {
+      continue;
+    }
+    if (other_bounds[i].max_jerk_ + margin < values[i])
+    {
+      return false;
+    }
+    else if (other_bounds[i].min_jerk_ - margin > values[i])
+    {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -136,7 +188,9 @@ void JointModel::setVariableBounds(const std::string& variable, const VariableBo
 void JointModel::setVariableBounds(const std::vector<moveit_msgs::msg::JointLimits>& jlim)
 {
   for (std::size_t j = 0; j < variable_names_.size(); ++j)
+  {
     for (const moveit_msgs::msg::JointLimits& joint_limit : jlim)
+    {
       if (joint_limit.joint_name == variable_names_[j])
       {
         variable_bounds_[j].position_bounded_ = joint_limit.has_position_limits;
@@ -157,8 +211,16 @@ void JointModel::setVariableBounds(const std::vector<moveit_msgs::msg::JointLimi
           variable_bounds_[j].min_acceleration_ = -joint_limit.max_acceleration;
           variable_bounds_[j].max_acceleration_ = joint_limit.max_acceleration;
         }
+        variable_bounds_[j].jerk_bounded_ = joint_limit.has_jerk_limits;
+        if (joint_limit.has_jerk_limits)
+        {
+          variable_bounds_[j].min_jerk_ = -joint_limit.max_jerk;
+          variable_bounds_[j].max_jerk_ = joint_limit.max_jerk;
+        }
         break;
       }
+    }
+  }
   computeVariableBoundsMsg();
 }
 
@@ -177,6 +239,8 @@ void JointModel::computeVariableBoundsMsg()
     lim.has_acceleration_limits = variable_bounds_[i].acceleration_bounded_;
     lim.max_acceleration =
         std::min(fabs(variable_bounds_[i].min_acceleration_), fabs(variable_bounds_[i].max_acceleration_));
+    lim.has_jerk_limits = variable_bounds_[i].jerk_bounded_;
+    lim.max_jerk = std::min(fabs(variable_bounds_[i].min_jerk_), fabs(variable_bounds_[i].max_jerk_));
     variable_bounds_msg_.push_back(lim);
   }
 }
@@ -210,11 +274,17 @@ namespace
 inline void printBoundHelper(std::ostream& out, double v)
 {
   if (v <= -std::numeric_limits<double>::infinity())
+  {
     out << "-inf";
+  }
   else if (v >= std::numeric_limits<double>::infinity())
+  {
     out << "inf";
+  }
   else
+  {
     out << v;
+  }
 }
 }  // namespace
 
@@ -234,6 +304,11 @@ std::ostream& operator<<(std::ostream& out, const VariableBounds& b)
   printBoundHelper(out, b.min_acceleration_);
   out << ", ";
   printBoundHelper(out, b.max_acceleration_);
+  out << "]; "
+      << "J." << (b.jerk_bounded_ ? "bounded" : "unbounded") << " [";
+  printBoundHelper(out, b.min_jerk_);
+  out << ", ";
+  printBoundHelper(out, b.max_jerk_);
   out << "];";
   return out;
 }

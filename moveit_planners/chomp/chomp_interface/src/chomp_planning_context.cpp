@@ -34,38 +34,35 @@
 
 /* Author: Chittaranjan Srinivas Swaminathan */
 
-#include <chomp_interface/chomp_planning_context.h>
-#include <moveit/trajectory_processing/iterative_time_parameterization.h>
-#include <moveit/robot_state/conversions.h>
+#include <chomp_interface/chomp_planning_context.hpp>
+#include <moveit/robot_state/conversions.hpp>
 
 namespace chomp_interface
 {
 CHOMPPlanningContext::CHOMPPlanningContext(const std::string& name, const std::string& group,
-                                           const moveit::core::RobotModelConstPtr& model)
+                                           const moveit::core::RobotModelConstPtr& model,
+                                           const rclcpp::Node::SharedPtr& node)
   : planning_interface::PlanningContext(name, group), robot_model_(model)
 {
-  chomp_interface_ = CHOMPInterfacePtr(new CHOMPInterface());
+  chomp_interface_ = std::make_shared<CHOMPInterface>(node);
 }
 
-bool CHOMPPlanningContext::solve(planning_interface::MotionPlanDetailedResponse& res)
+void CHOMPPlanningContext::solve(planning_interface::MotionPlanDetailedResponse& res)
 {
-  return chomp_interface_->solve(planning_scene_, request_, chomp_interface_->getParams(), res);
+  chomp_interface_->solve(planning_scene_, request_, chomp_interface_->getParams(), res);
 }
 
-bool CHOMPPlanningContext::solve(planning_interface::MotionPlanResponse& res)
+void CHOMPPlanningContext::solve(planning_interface::MotionPlanResponse& res)
 {
   planning_interface::MotionPlanDetailedResponse res_detailed;
-  bool planning_success = solve(res_detailed);
-
-  res.error_code_ = res_detailed.error_code_;
-
-  if (planning_success)
+  solve(res_detailed);
+  if (res_detailed.error_code.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS)
   {
-    res.trajectory_ = res_detailed.trajectory_[0];
-    res.planning_time_ = res_detailed.processing_time_[0];
+    res.trajectory = res_detailed.trajectory[0];
+    res.planning_time = res_detailed.processing_time[0];
   }
 
-  return planning_success;
+  res.error_code = res_detailed.error_code;
 }
 
 bool CHOMPPlanningContext::terminate()
@@ -78,4 +75,4 @@ void CHOMPPlanningContext::clear()
 {
 }
 
-} /* namespace chomp_interface */
+}  // namespace chomp_interface

@@ -34,15 +34,15 @@
 
 /* Author: Michael Goerner */
 
-#include "apply_planning_scene_service_capability.h"
-#include <moveit/move_group/capability_names.h>
+#include "apply_planning_scene_service_capability.hpp"
+#include <moveit/moveit_cpp/moveit_cpp.hpp>
+#include <moveit/move_group/capability_names.hpp>
+#include <moveit/utils/logger.hpp>
 
 namespace move_group
 {
-static const rclcpp::Logger LOGGER =
-    rclcpp::get_logger("moveit_move_group_default_capabilities.apply_planning_scene_service_capability");
 
-ApplyPlanningSceneService::ApplyPlanningSceneService() : MoveGroupCapability("ApplyPlanningSceneService")
+ApplyPlanningSceneService::ApplyPlanningSceneService() : MoveGroupCapability("apply_planning_scene_service")
 {
 }
 
@@ -52,17 +52,23 @@ void ApplyPlanningSceneService::initialize()
   using std::placeholders::_2;
   using std::placeholders::_3;
 
-  service_ = context_->node_->create_service<moveit_msgs::srv::ApplyPlanningScene>(
-      APPLY_PLANNING_SCENE_SERVICE_NAME, std::bind(&ApplyPlanningSceneService::applyScene, this, _1, _2, _3));
+  service_ = context_->moveit_cpp_->getNode()->create_service<moveit_msgs::srv::ApplyPlanningScene>(
+      APPLY_PLANNING_SCENE_SERVICE_NAME,
+      [this](const std::shared_ptr<rmw_request_id_t>& request_header,
+             const std::shared_ptr<moveit_msgs::srv::ApplyPlanningScene::Request>& req,
+             const std::shared_ptr<moveit_msgs::srv::ApplyPlanningScene::Response>& res) {
+        return applyScene(request_header, req, res);
+      });
 }
 
-bool ApplyPlanningSceneService::applyScene(const std::shared_ptr<rmw_request_id_t> request_header,
-                                           const std::shared_ptr<moveit_msgs::srv::ApplyPlanningScene::Request> req,
-                                           std::shared_ptr<moveit_msgs::srv::ApplyPlanningScene::Response> res)
+bool ApplyPlanningSceneService::applyScene(const std::shared_ptr<rmw_request_id_t>& /* unused */,
+                                           const std::shared_ptr<moveit_msgs::srv::ApplyPlanningScene::Request>& req,
+                                           const std::shared_ptr<moveit_msgs::srv::ApplyPlanningScene::Response>& res)
 {
   if (!context_->planning_scene_monitor_)
   {
-    RCLCPP_ERROR(LOGGER, "Cannot apply PlanningScene as no scene is monitored.");
+    RCLCPP_ERROR(moveit::getLogger("moveit.ros.move_group.apply_planning_scene_service"),
+                 "Cannot apply PlanningScene as no scene is monitored.");
     return true;
   }
   context_->planning_scene_monitor_->updateFrameTransforms();

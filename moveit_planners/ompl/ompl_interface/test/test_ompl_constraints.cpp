@@ -41,7 +41,7 @@
  *  NOTE q = joint positions
  **/
 
-#include "load_test_robot.h"
+#include "load_test_robot.hpp"
 
 #include <memory>
 #include <string>
@@ -50,19 +50,23 @@
 #include <gtest/gtest.h>
 #include <Eigen/Dense>
 
-#include <moveit/robot_model/robot_model.h>
-#include <moveit/robot_state/robot_state.h>
-#include <moveit/robot_state/conversions.h>
-#include <moveit/utils/robot_model_test_utils.h>
-#include <moveit/ompl_interface/detail/ompl_constraints.h>
+#include <moveit/robot_model/robot_model.hpp>
+#include <moveit/robot_state/robot_state.hpp>
+#include <moveit/robot_state/conversions.hpp>
+#include <moveit/utils/robot_model_test_utils.hpp>
+#include <moveit/ompl_interface/detail/ompl_constraints.hpp>
 #include <moveit_msgs/msg/constraints.hpp>
+#include <moveit/utils/logger.hpp>
 
 #include <ompl/util/Exception.h>
 #include <ompl/base/spaces/RealVectorStateSpace.h>
 #include <ompl/base/spaces/constraint/ProjectedStateSpace.h>
 #include <ompl/base/ConstrainedSpaceInformation.h>
 
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit.ompl_planning.test.test_ompl_constraints");
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.planners.ompl.test_constraints");
+}
 
 /** \brief Number of times to run a test that uses randomly generated input. **/
 constexpr int NUM_RANDOM_TESTS = 10;
@@ -139,7 +143,7 @@ protected:
     // helper matrix for differentiation.
     Eigen::MatrixXd m_helper = h * Eigen::MatrixXd::Identity(num_dofs_, num_dofs_);
 
-    for (std::size_t dim = 0; dim < num_dofs_; dim++)
+    for (std::size_t dim = 0; dim < num_dofs_; ++dim)
     {
       Eigen::Vector3d pos = fk(q, link_name).translation();
       Eigen::Vector3d pos_plus_h = fk(q + m_helper.col(dim), link_name).translation();
@@ -163,7 +167,7 @@ protected:
   {
     std::string different_link = joint_model_group_->getLinkModelNames().at(num_dofs_ - DIFFERENT_LINK_OFFSET);
 
-    RCLCPP_DEBUG_STREAM(LOGGER, different_link);
+    RCLCPP_DEBUG_STREAM(getLogger(), different_link);
 
     moveit_msgs::msg::Constraints constraint_msgs;
     constraint_msgs.position_constraints.push_back(createPositionConstraint(base_link_name_, different_link));
@@ -176,7 +180,7 @@ protected:
   {
     moveit_msgs::msg::PositionConstraint pos_con_msg = createPositionConstraint(base_link_name_, ee_link_name_);
 
-    // Make the tolerance on the x dimension smaller than the treshold used to recognize equality constraints.
+    // Make the tolerance on the x dimension smaller than the threshold used to recognize equality constraints.
     // (see docstring EqualityPositionConstraint::equality_constraint_threshold).
     pos_con_msg.constraint_region.primitives.at(0).dimensions[0] = 0.0005;
 
@@ -200,17 +204,17 @@ protected:
 
     double total_error = 999.9;
 
-    for (int i = 0; i < NUM_RANDOM_TESTS; i++)
+    for (int i = 0; i < NUM_RANDOM_TESTS; ++i)
     {
       auto q = getRandomState();
       auto jac_exact = constraint_->calcErrorJacobian(q);
 
       Eigen::MatrixXd jac_approx = numericalJacobianPosition(q, constraint_->getLinkName());
 
-      RCLCPP_DEBUG_STREAM(LOGGER, "Analytical jacobian:");
-      RCLCPP_DEBUG_STREAM(LOGGER, jac_exact);
-      RCLCPP_DEBUG_STREAM(LOGGER, "Finite difference jacobian:");
-      RCLCPP_DEBUG_STREAM(LOGGER, jac_approx);
+      RCLCPP_DEBUG_STREAM(getLogger(), "Analytical jacobian:");
+      RCLCPP_DEBUG_STREAM(getLogger(), jac_exact);
+      RCLCPP_DEBUG_STREAM(getLogger(), "Finite difference jacobian:");
+      RCLCPP_DEBUG_STREAM(getLogger(), jac_approx);
 
       total_error = (jac_exact - jac_approx).lpNorm<1>();
       EXPECT_LT(total_error, JAC_ERROR_TOLERANCE);
@@ -228,9 +232,9 @@ protected:
     auto joint_limits = joint_model_group_->getActiveJointModelsBounds();
     EXPECT_EQ(joint_limits.size(), num_dofs_);
 
-    for (std::size_t i = 0; i < num_dofs_; i++)
+    for (std::size_t i = 0; i < num_dofs_; ++i)
     {
-      EXPECT_EQ(joint_limits[i]->size(), (unsigned int)1);
+      EXPECT_EQ(joint_limits[i]->size(), 1u);
       bounds.setLow(i, joint_limits[i]->at(0).min_position_);
       bounds.setHigh(i, joint_limits[i]->at(0).max_position_);
     }
@@ -248,14 +252,14 @@ protected:
     // But these issues do not prevent us to use the ConstrainedPlanningStateSpace! :)
     // The jacobian test is expected to fail because of the discontinuous constraint derivative.
     // In addition not all samples returned from the state sampler will be valid.
-    // For more details: https://github.com/ros-planning/moveit/issues/2092#issuecomment-669911722
+    // For more details: https://github.com/moveit/moveit/issues/2092#issuecomment-669911722
     try
     {
       constrained_state_space->sanityChecks();
     }
     catch (ompl::Exception& ex)
     {
-      RCLCPP_ERROR(LOGGER, "Sanity checks did not pass: %s", ex.what());
+      RCLCPP_ERROR(getLogger(), "Sanity checks did not pass: %s", ex.what());
     }
   }
 
@@ -281,7 +285,7 @@ protected:
     jac.setOnes();  // fill in known but wrong values that should all be overwritten
     constraint_->jacobian(joint_values, jac);
 
-    for (std::size_t i = 0; i < num_dofs_; i++)
+    for (std::size_t i = 0; i < num_dofs_; ++i)
     {
       // rows for unconstrained dimensions should always be zero
       EXPECT_DOUBLE_EQ(jac(1, i), 0.0);

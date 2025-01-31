@@ -17,8 +17,8 @@ to this:
       kinematics_solver: cached_ik_kinematics_plugin/CachedKDLKinematicsPlugin
       # optional parameters for caching:
       max_cache_size: 10000
-      min_pose_distance: 1
-      min_joint_config_distance: 4
+      min_pose_distance: 1.0
+      min_joint_config_distance: 4.0
 
 The cache size can be controlled with an absolute cap (`max_cache_size`) or with a distance threshold on the end effector pose (`min_pose_distance`) or robot joint state (`min_joint_config_distance`). Normally, the cache files are saved to the current working directory (which is usually `${HOME}/.ros`, not the directory where you ran `roslaunch`), in a subdirectory for each robot. Possible values for `kinematics_solver` are:
 
@@ -54,11 +54,11 @@ Below is a complete list of all arguments:
 
 ## Advanced Usage: Creating Wrappers for Other IK Solvers
 
-The Cached IK Kinematics Plugin is implemented as a wrapper around classed derived from the [`kinematics::KinematicsBase` abstract base class](http://docs.ros.org/latest-lts/api/moveit_core/html/classkinematics_1_1KinematicsBase.html). Wrappers for the `kdl_kinematics_plugin::KDLKinematicsPlugin` and `srv_kinematics_plugin::SrvKinematicsPlugin` classes are already included in the plugin. For any other solver, you can create a new kinematics plugin. The C++ code for doing so is extremely simple; here is the code to create a wrapper for the KDL solver:
+The Cached IK Kinematics Plugin is implemented as a wrapper around classed derived from the `kinematics::KinematicsBase` [abstract base class](http://docs.ros.org/en/latest/api/moveit_core/html/cpp/classkinematics_1_1KinematicsBase.html). Wrappers for the `kdl_kinematics_plugin::KDLKinematicsPlugin` and `srv_kinematics_plugin::SrvKinematicsPlugin` classes are already included in the plugin. For any other solver, you can create a new kinematics plugin. The C++ code for doing so is extremely simple; here is the code to create a wrapper for the KDL solver:
 
-    #include "cached_ik_kinematics_plugin.h"
-    #include <moveit/kdl_kinematics_plugin/kdl_kinematics_plugin.h>
-    #include <pluginlib/class_list_macros.h>
+    #include "cached_ik_kinematics_plugin.hpp"
+    #include <moveit/kdl_kinematics_plugin/kdl_kinematics_plugin.hpp>
+    #include <pluginlib/class_list_macros.hpp>
     PLUGINLIB_EXPORT_CLASS(cached_ik_kinematics_plugin::CachedIKKinematicsPlugin<kdl_kinematics_plugin::KDLKinematicsPlugin>, kinematics::KinematicsBase);
 
 In the catkin `package.xml` file for your plugin, you add these lines just before `</package>`:
@@ -69,7 +69,7 @@ In the catkin `package.xml` file for your plugin, you add these lines just befor
 
 Next, create the file my_ik_plugin.xml with the following contents:
 
-    <library path="lib/libmy_ik_plugin">
+    <library path="my_ik_plugin">
       <class name="cached_ik_kinematics_plugin/CachedMyKinematicsPlugin" type="cached_ik_kinematics_plugin::CachedIKKinematicsPlugin<my_kinematics_plugin::MyKinematicsPlugin>" base_class_type="kinematics::KinematicsBase">
         <description>
           A kinematics plugin for persistently caching IK solutions computed with the KDL kinematics plugin.

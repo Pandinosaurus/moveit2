@@ -34,8 +34,8 @@
 
 /* Author: Robert Haschke */
 
-#include <moveit/motion_planning_rviz_plugin/motion_planning_frame_joints_widget.h>
-#include <moveit/motion_planning_rviz_plugin/motion_planning_display.h>
+#include <moveit/motion_planning_rviz_plugin/motion_planning_frame_joints_widget.hpp>
+#include <moveit/motion_planning_rviz_plugin/motion_planning_display.hpp>
 
 #include "ui_motion_planning_rviz_plugin_frame_joints.h"
 #include <QPainter>
@@ -45,7 +45,6 @@
 
 namespace moveit_rviz_plugin
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_ros_visualization.motion_planning_frame_joints_widget");
 
 JMGItemModel::JMGItemModel(const moveit::core::RobotState& robot_state, const std::string& group_name, QObject* parent)
   : QAbstractTableModel(parent), robot_state_(robot_state), jmg_(nullptr)
@@ -57,9 +56,13 @@ JMGItemModel::JMGItemModel(const moveit::core::RobotState& robot_state, const st
 int JMGItemModel::rowCount(const QModelIndex& /*parent*/) const
 {
   if (!jmg_)
+  {
     return robot_state_.getVariableCount();
+  }
   else
+  {
     return jmg_->getVariableCount();
+  }
 }
 
 int JMGItemModel::columnCount(const QModelIndex& /*parent*/) const
@@ -73,12 +76,12 @@ Qt::ItemFlags JMGItemModel::flags(const QModelIndex& index) const
     return Qt::ItemFlags();
 
   Qt::ItemFlags f = QAbstractTableModel::flags(index);
+
+  const moveit::core::JointModel* jm = getJointModel(index);
+  bool is_editable = !jm->isPassive() && !jm->getMimic();
+  f.setFlag(Qt::ItemIsEnabled, is_editable);
   if (index.column() == 1)
-  {
-    const moveit::core::JointModel* jm = getJointModel(index);
-    if (!jm->isPassive() && !jm->getMimic())  // these are not editable
-      f |= Qt::ItemIsEditable;
-  }
+    f.setFlag(Qt::ItemIsEditable, is_editable);
   return f;
 }
 
@@ -202,20 +205,26 @@ MotionPlanningFrameJointsWidget::~MotionPlanningFrameJointsWidget()
   delete ui_;
 }
 
+void MotionPlanningFrameJointsWidget::clearRobotModel()
+{
+  ui_->joints_view_->setModel(nullptr);
+  start_state_handler_.reset();
+  goal_state_handler_.reset();
+  start_state_model_.reset();
+  goal_state_model_.reset();
+}
+
 void MotionPlanningFrameJointsWidget::changePlanningGroup(
     const std::string& group_name, const robot_interaction::InteractionHandlerPtr& start_state_handler,
     const robot_interaction::InteractionHandlerPtr& goal_state_handler)
 {
   // release previous models (if any)
-  ui_->joints_view_->setModel(nullptr);
-  start_state_model_.reset();
-  goal_state_model_.reset();
-
+  clearRobotModel();
   // create new models
   start_state_handler_ = start_state_handler;
   goal_state_handler_ = goal_state_handler;
-  start_state_model_.reset(new JMGItemModel(*start_state_handler_->getState(), group_name, this));
-  goal_state_model_.reset(new JMGItemModel(*goal_state_handler_->getState(), group_name, this));
+  start_state_model_ = std::make_unique<JMGItemModel>(*start_state_handler_->getState(), group_name, this);
+  goal_state_model_ = std::make_unique<JMGItemModel>(*goal_state_handler_->getState(), group_name, this);
 
   // forward model updates to the PlanningDisplay
   connect(start_state_model_.get(), &JMGItemModel::dataChanged, this, [this]() {
@@ -264,9 +273,13 @@ void MotionPlanningFrameJointsWidget::setActiveModel(JMGItemModel* model)
 void MotionPlanningFrameJointsWidget::triggerUpdate(JMGItemModel* model)
 {
   if (model == start_state_model_.get())
+  {
     planning_display_->setQueryStartState(model->getRobotState());
+  }
   else
+  {
     planning_display_->setQueryGoalState(model->getRobotState());
+  }
 }
 
 // Find matching key vector in columns of haystack and return the best-aligned column index.
@@ -339,6 +352,9 @@ cleanup:
   if (i == 0)
     nullspace_.resize(0, 0);
 
+  // show/hide dummy slider
+  ui_->dummy_ns_slider_->setVisible(i == 0);
+
   // hide remaining sliders
   for (; i < ns_sliders_.size(); ++i)
     ns_sliders_[i]->hide();
@@ -406,8 +422,8 @@ void ProgressBarDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
     if (vbounds.isValid())
     {
       QPointF bounds = vbounds.toPointF();
-      const float min = bounds.x();
-      const float max = bounds.y();
+      const double min = bounds.x();
+      const double max = bounds.y();
 
       QStyleOptionProgressBar opt;
       opt.rect = option.rect;
@@ -435,8 +451,8 @@ QWidget* ProgressBarDelegate::createEditor(QWidget* parent, const QStyleOptionVi
     if (vbounds.isValid())
     {
       QPointF bounds = vbounds.toPointF();
-      float min = bounds.x();
-      float max = bounds.y();
+      double min = bounds.x();
+      double max = bounds.y();
       bool is_revolute = (index.data(JointTypeRole).toInt() == moveit::core::JointModel::REVOLUTE);
       if (is_revolute)
       {
@@ -445,7 +461,7 @@ QWidget* ProgressBarDelegate::createEditor(QWidget* parent, const QStyleOptionVi
       }
       auto* editor = new ProgressBarEditor(parent, min, max, is_revolute ? 0 : 3);
       connect(editor, &ProgressBarEditor::editingFinished, this, &ProgressBarDelegate::commitAndCloseEditor);
-      connect(editor, &ProgressBarEditor::valueChanged, this, [=](float value) {
+      connect(editor, &ProgressBarEditor::valueChanged, this, [=](double value) {
         const_cast<QAbstractItemModel*>(index.model())->setData(index, value, Qt::EditRole);
       });
       return editor;
@@ -471,7 +487,7 @@ bool JointsWidgetEventFilter::eventFilter(QObject* /*target*/, QEvent* event)
   {
     QAbstractItemView* view = qobject_cast<QAbstractItemView*>(parent());
     QModelIndex index = view->indexAt(static_cast<QMouseEvent*>(event)->pos());
-    if (index.isValid() && index.column() == 1)  // mouse event on any of joint indexes?
+    if (index.flags() & Qt::ItemIsEditable)  // mouse event on any editable slider?
     {
       view->setCurrentIndex(index);
       view->edit(index);
@@ -481,12 +497,12 @@ bool JointsWidgetEventFilter::eventFilter(QObject* /*target*/, QEvent* event)
   return false;
 }
 
-ProgressBarEditor::ProgressBarEditor(QWidget* parent, float min, float max, int digits)
+ProgressBarEditor::ProgressBarEditor(QWidget* parent, double min, double max, int digits)
   : QWidget(parent), min_(min), max_(max), digits_(digits)
 {
   // if left mouse button is pressed, grab all future mouse events until button(s) released
   if (QApplication::mouseButtons() & Qt::LeftButton)
-    this->grabMouse();
+    grabMouse();
 }
 
 void ProgressBarEditor::paintEvent(QPaintEvent* /*event*/)
@@ -495,7 +511,7 @@ void ProgressBarEditor::paintEvent(QPaintEvent* /*event*/)
 
   QStyleOptionProgressBar opt;
   opt.rect = rect();
-  opt.palette = this->palette();
+  opt.palette = palette();
   opt.minimum = 0;
   opt.maximum = 1000;
   opt.progress = 1000. * (value_ - min_) / (max_ - min_);
@@ -513,7 +529,7 @@ void ProgressBarEditor::mousePressEvent(QMouseEvent* event)
 
 void ProgressBarEditor::mouseMoveEvent(QMouseEvent* event)
 {
-  float v = std::min(max_, std::max(min_, min_ + event->x() * (max_ - min_) / width()));
+  double v = std::min(max_, std::max(min_, min_ + event->x() * (max_ - min_) / width()));
   if (value_ != v)
   {
     value_ = v;

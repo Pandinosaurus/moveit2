@@ -33,9 +33,11 @@
  * Author: Levi Armstrong
  */
 
-#include "moveit/collision_detection_bullet/bullet_integration/contact_checker_common.h"
+#include <moveit/collision_detection_bullet/bullet_integration/contact_checker_common.hpp>
 
-static const rclcpp::Logger BULLET_LOGGER = rclcpp::get_logger("collision_detection.bullet");
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <moveit/collision_detection_bullet/bullet_integration/ros_bullet_utils.hpp>
 
 namespace collision_detection_bullet
 {
@@ -51,7 +53,7 @@ collision_detection::Contact* processResult(ContactTestData& cdata, collision_de
     }
   }
 
-  RCLCPP_DEBUG_STREAM(BULLET_LOGGER, "Contact btw " << key.first << " and " << key.second << " dist: " << contact.depth);
+  RCLCPP_DEBUG_STREAM(getLogger(), "Contact btw " << key.first << " and " << key.second << " dist: " << contact.depth);
   // case if pair hasn't a contact yet
   if (!found)
   {
@@ -62,7 +64,7 @@ collision_detection::Contact* processResult(ContactTestData& cdata, collision_de
 
     std::vector<collision_detection::Contact> data;
 
-    // if we dont want contacts we are done here
+    // if we don't want contacts we are done here
     if (!cdata.req.contacts)
     {
       if (!cdata.req.distance)
@@ -136,13 +138,13 @@ int createConvexHull(AlignedVector<Eigen::Vector3d>& vertices, std::vector<int>&
                               static_cast<btScalar>(shrinkClamp));
   if (val < 0)
   {
-    RCLCPP_ERROR(BULLET_LOGGER, "Failed to create convex hull");
+    RCLCPP_ERROR(getLogger(), "Failed to create convex hull");
     return -1;
   }
 
   int num_verts = conv.vertices.size();
   vertices.reserve(static_cast<size_t>(num_verts));
-  for (int i = 0; i < num_verts; i++)
+  for (int i = 0; i < num_verts; ++i)
   {
     btVector3& v = conv.vertices[i];
     vertices.push_back(Eigen::Vector3d(v.getX(), v.getY(), v.getZ()));
@@ -150,7 +152,7 @@ int createConvexHull(AlignedVector<Eigen::Vector3d>& vertices, std::vector<int>&
 
   int num_faces = conv.faces.size();
   faces.reserve(static_cast<size_t>(3 * num_faces));
-  for (int i = 0; i < num_faces; i++)
+  for (int i = 0; i < num_faces; ++i)
   {
     std::vector<int> face;
     face.reserve(3);

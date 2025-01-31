@@ -36,7 +36,7 @@
 /* Author: Tyler Weaver */
 
 /* These integration tests are based on the tutorials for using move_group to do a pick and place:
- * https://ros-planning.github.io/moveit_tutorials/doc/pick_place/pick_place_tutorial.html
+ * https://moveit.github.io/moveit_tutorials/doc/pick_place/pick_place_tutorial.html
  */
 
 // C++
@@ -49,11 +49,11 @@
 #include <gtest/gtest.h>
 
 // MoveIt
-#include <moveit/planning_scene_interface/planning_scene_interface.h>
-#include <moveit/move_group_interface/move_group_interface.h>
+#include <moveit/planning_scene_interface/planning_scene_interface.hpp>
+#include <moveit/move_group_interface/move_group_interface.hpp>
 
 // TF2
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 static const std::string PLANNING_GROUP = "panda_arm";
 constexpr double PLANNING_TIME_S = 45.0;
@@ -219,7 +219,7 @@ TEST_F(PickPlaceTestFixture, PickPlaceTest)
   // Set support surface as table1.
   move_group_->setSupportSurfaceName("table1");
   // Call pick to pick up the object using the grasps given
-  ASSERT_EQ(move_group_->pick("object", grasps), moveit::planning_interface::MoveItErrorCode::SUCCESS);
+  ASSERT_EQ(move_group_->pick("object", grasps), moveit::core::MoveItErrorCode::SUCCESS);
 
   // Ideally, you would create a vector of place locations to be attempted although in this example, we only create
   // a single place location.
@@ -274,7 +274,7 @@ TEST_F(PickPlaceTestFixture, PickPlaceTest)
   // Set support surface as table2.
   move_group_->setSupportSurfaceName("table2");
   // Call place to place the object using the place locations given.
-  ASSERT_EQ(move_group_->place("object", place_location), moveit::planning_interface::MoveItErrorCode::SUCCESS);
+  ASSERT_EQ(move_group_->place("object", place_location), moveit::core::MoveItErrorCode::SUCCESS);
 }
 
 int main(int argc, char** argv)

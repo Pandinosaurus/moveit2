@@ -33,15 +33,15 @@
  *********************************************************************/
 
 /* Author: Ioan Sucan */
-#include <moveit/warehouse/planning_scene_storage.h>
-#include <moveit/warehouse/constraints_storage.h>
-#include <moveit/warehouse/state_storage.h>
+#include <moveit/warehouse/planning_scene_storage.hpp>
+#include <moveit/warehouse/constraints_storage.hpp>
+#include <moveit/warehouse/state_storage.hpp>
 
-#include <moveit/motion_planning_rviz_plugin/motion_planning_frame.h>
-#include <moveit/motion_planning_rviz_plugin/motion_planning_display.h>
-#include <moveit/kinematic_constraints/utils.h>
-#include <moveit/robot_state/conversions.h>
-#include <moveit/robot_interaction/interactive_marker_helpers.h>
+#include <moveit/motion_planning_rviz_plugin/motion_planning_frame.hpp>
+#include <moveit/motion_planning_rviz_plugin/motion_planning_display.hpp>
+#include <moveit/kinematic_constraints/utils.hpp>
+#include <moveit/robot_state/conversions.hpp>
+#include <moveit/robot_interaction/interactive_marker_helpers.hpp>
 
 #include <interactive_markers/tools.hpp>
 
@@ -53,13 +53,10 @@
 
 #include "ui_motion_planning_rviz_plugin_frame.h"
 
-#include <boost/math/constants/constants.hpp>
-
 #include <memory>
 
 namespace moveit_rviz_plugin
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_ros_visualization.motion_planning_frame_scenes");
 
 void MotionPlanningFrame::saveSceneButtonClicked()
 {
@@ -70,17 +67,22 @@ void MotionPlanningFrame::saveSceneButtonClicked()
     {
       std::unique_ptr<QMessageBox> q;
       if (name.empty())
-        q.reset(new QMessageBox(QMessageBox::Question, "Change Planning Scene Name",
-                                QString("The name for the planning scene should not be empty. Would you like to rename "
-                                        "the planning scene?'"),
-                                QMessageBox::Cancel, this));
+      {
+        q = std::make_unique<QMessageBox>(
+            QMessageBox::Question, "Change Planning Scene Name",
+            QString("The name for the planning scene should not be empty. Would you like to rename "
+                    "the planning scene?'"),
+            QMessageBox::Cancel, this);
+      }
       else
-        q.reset(new QMessageBox(QMessageBox::Question, "Confirm Planning Scene Overwrite",
-                                QString("A planning scene named '")
-                                    .append(name.c_str())
-                                    .append("' already exists. Do you wish to "
-                                            "overwrite that scene?"),
-                                QMessageBox::Yes | QMessageBox::No, this));
+      {
+        q = std::make_unique<QMessageBox>(QMessageBox::Question, "Confirm Planning Scene Overwrite",
+                                          QString("A planning scene named '")
+                                              .append(name.c_str())
+                                              .append("' already exists. Do you wish to "
+                                                      "overwrite that scene?"),
+                                          QMessageBox::Yes | QMessageBox::No, this);
+      }
       std::unique_ptr<QPushButton> rename(q->addButton("&Rename", QMessageBox::AcceptRole));
       if (q->exec() != QMessageBox::Yes)
       {
@@ -109,8 +111,7 @@ void MotionPlanningFrame::saveSceneButtonClicked()
       }
     }
 
-    planning_display_->addBackgroundJob(boost::bind(&MotionPlanningFrame::computeSaveSceneButtonClicked, this),
-                                        "save scene");
+    planning_display_->addBackgroundJob([this] { computeSaveSceneButtonClicked(); }, "save scene");
   }
 }
 
@@ -132,8 +133,7 @@ void MotionPlanningFrame::saveQueryButtonClicked()
       if (s->type() == ITEM_TYPE_SCENE)
       {
         std::string scene = s->text(0).toStdString();
-        planning_display_->addBackgroundJob(
-            boost::bind(&MotionPlanningFrame::computeSaveQueryButtonClicked, this, scene, ""), "save query");
+        planning_display_->addBackgroundJob([this, scene] { computeSaveQueryButtonClicked(scene, ""); }, "save query");
       }
       else
       {
@@ -145,20 +145,27 @@ void MotionPlanningFrame::saveQueryButtonClicked()
         {
           std::unique_ptr<QMessageBox> q;
           if (query_name.empty())
-            q.reset(new QMessageBox(QMessageBox::Question, "Change Planning Query Name",
-                                    QString("The name for the planning query should not be empty. Would you like to"
-                                            "rename the planning query?'"),
-                                    QMessageBox::Cancel, this));
+          {
+            q = std::make_unique<QMessageBox>(
+                QMessageBox::Question, "Change Planning Query Name",
+                QString("The name for the planning query should not be empty. Would you like to"
+                        "rename the planning query?'"),
+                QMessageBox::Cancel, this);
+          }
           else
-            q.reset(new QMessageBox(QMessageBox::Question, "Confirm Planning Query Overwrite",
-                                    QString("A planning query named '")
-                                        .append(query_name.c_str())
-                                        .append("' already exists. Do you wish "
-                                                "to overwrite that query?"),
-                                    QMessageBox::Yes | QMessageBox::No, this));
+          {
+            q = std::make_unique<QMessageBox>(QMessageBox::Question, "Confirm Planning Query Overwrite",
+                                              QString("A planning query named '")
+                                                  .append(query_name.c_str())
+                                                  .append("' already exists. Do you wish "
+                                                          "to overwrite that query?"),
+                                              QMessageBox::Yes | QMessageBox::No, this);
+          }
           std::unique_ptr<QPushButton> rename(q->addButton("&Rename", QMessageBox::AcceptRole));
           if (q->exec() == QMessageBox::Yes)
+          {
             break;
+          }
           else
           {
             if (q->clickedButton() == rename.get())
@@ -168,16 +175,20 @@ void MotionPlanningFrame::saveQueryButtonClicked()
                                                        "New name for the planning query:", QLineEdit::Normal,
                                                        QString::fromStdString(query_name), &ok);
               if (ok)
+              {
                 query_name = new_name.toStdString();
+              }
               else
+              {
                 return;
+              }
             }
             else
               return;
           }
         }
         planning_display_->addBackgroundJob(
-            boost::bind(&MotionPlanningFrame::computeSaveQueryButtonClicked, this, scene, query_name), "save query");
+            [this, scene, query_name] { computeSaveQueryButtonClicked(scene, query_name); }, "save query");
       }
     }
   }
@@ -185,26 +196,22 @@ void MotionPlanningFrame::saveQueryButtonClicked()
 
 void MotionPlanningFrame::deleteSceneButtonClicked()
 {
-  planning_display_->addBackgroundJob(boost::bind(&MotionPlanningFrame::computeDeleteSceneButtonClicked, this),
-                                      "delete scene");
+  planning_display_->addBackgroundJob([this] { computeDeleteSceneButtonClicked(); }, "delete scene");
 }
 
 void MotionPlanningFrame::deleteQueryButtonClicked()
 {
-  planning_display_->addBackgroundJob(boost::bind(&MotionPlanningFrame::computeDeleteQueryButtonClicked, this),
-                                      "delete query");
+  planning_display_->addBackgroundJob([this] { computeDeleteQueryButtonClicked(); }, "delete query");
 }
 
 void MotionPlanningFrame::loadSceneButtonClicked()
 {
-  planning_display_->addBackgroundJob(boost::bind(&MotionPlanningFrame::computeLoadSceneButtonClicked, this),
-                                      "load scene");
+  planning_display_->addBackgroundJob([this] { computeLoadSceneButtonClicked(); }, "load scene");
 }
 
 void MotionPlanningFrame::loadQueryButtonClicked()
 {
-  planning_display_->addBackgroundJob(boost::bind(&MotionPlanningFrame::computeLoadQueryButtonClicked, this),
-                                      "load query");
+  planning_display_->addBackgroundJob([this] { computeLoadQueryButtonClicked(); }, "load query");
 }
 
 void MotionPlanningFrame::warehouseItemNameChanged(QTreeWidgetItem* item, int column)
@@ -221,7 +228,7 @@ void MotionPlanningFrame::warehouseItemNameChanged(QTreeWidgetItem* item, int co
 
     if (planning_scene_storage->hasPlanningScene(new_name))
     {
-      planning_display_->addMainLoopJob(boost::bind(&MotionPlanningFrame::populatePlanningSceneTreeView, this));
+      planning_display_->addMainLoopJob([this] { populatePlanningSceneTreeView(); });
       QMessageBox::warning(this, "Scene not renamed",
                            QString("The scene name '").append(item->text(column)).append("' already exists"));
       return;
@@ -239,7 +246,7 @@ void MotionPlanningFrame::warehouseItemNameChanged(QTreeWidgetItem* item, int co
     std::string new_name = item->text(column).toStdString();
     if (planning_scene_storage->hasPlanningQuery(scene, new_name))
     {
-      planning_display_->addMainLoopJob(boost::bind(&MotionPlanningFrame::populatePlanningSceneTreeView, this));
+      planning_display_->addMainLoopJob([this] { populatePlanningSceneTreeView(); });
       QMessageBox::warning(this, "Query not renamed",
                            QString("The query name '")
                                .append(item->text(column))

@@ -36,19 +36,22 @@
 
 #include <limits>
 
-#include <moveit/ompl_interface/parameterization/joint_space/joint_model_state_space.h>
-#include <moveit/ompl_interface/parameterization/work_space/pose_model_state_space.h>
+#include <moveit/ompl_interface/parameterization/joint_space/joint_model_state_space.hpp>
+#include <moveit/ompl_interface/parameterization/work_space/pose_model_state_space.hpp>
 
 #include <urdf_parser/urdf_parser.h>
 
 #include <ompl/util/Exception.h>
-#include <moveit/robot_state/conversions.h>
-#include <moveit/utils/robot_model_test_utils.h>
+#include <moveit/robot_state/conversions.hpp>
+#include <moveit/utils/robot_model_test_utils.hpp>
+#include <moveit/utils/logger.hpp>
 #include <gtest/gtest.h>
 #include <fstream>
-#include <boost/filesystem/path.hpp>
 
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit.ompl_planning.test.test_state_space");
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.planners.ompl.test_state_space");
+}
 
 constexpr double EPSILON = std::numeric_limits<double>::epsilon();
 
@@ -84,7 +87,7 @@ TEST_F(LoadPlanningModelsPr2, StateSpace)
   }
   catch (ompl::Exception& ex)
   {
-    RCLCPP_ERROR(LOGGER, "Sanity checks did not pass: %s", ex.what());
+    RCLCPP_ERROR(getLogger(), "Sanity checks did not pass: %s", ex.what());
   }
   EXPECT_TRUE(passed);
 }
@@ -127,7 +130,7 @@ TEST_F(LoadPlanningModelsPr2, StateSpaceCopy)
   }
   catch (ompl::Exception& ex)
   {
-    RCLCPP_ERROR(LOGGER, "Sanity checks did not pass: %s", ex.what());
+    RCLCPP_ERROR(getLogger(), "Sanity checks did not pass: %s", ex.what());
   }
   EXPECT_TRUE(passed);
 
@@ -144,12 +147,12 @@ TEST_F(LoadPlanningModelsPr2, StateSpaceCopy)
         robot_state.getRobotModel()->getJointModelGroup(joint_model_state_space.getJointModelGroupName()));
     std::cout << (robot_state.getGlobalLinkTransform("r_wrist_roll_link").translation() -
                   robot_state2.getGlobalLinkTransform("r_wrist_roll_link").translation())
-              << std::endl;
+              << '\n';
     EXPECT_TRUE(robot_state.distance(robot_state2) > EPSILON);
     joint_model_state_space.copyToRobotState(robot_state, state);
     std::cout << (robot_state.getGlobalLinkTransform("r_wrist_roll_link").translation() -
                   robot_state2.getGlobalLinkTransform("r_wrist_roll_link").translation())
-              << std::endl;
+              << '\n';
     EXPECT_TRUE(robot_state.distance(robot_state2) < EPSILON);
   }
 
@@ -208,7 +211,7 @@ TEST(TestDiffDrive, TestStateSpace)
   }
   catch (ompl::Exception& ex)
   {
-    RCLCPP_ERROR(LOGGER, "Sanity checks did not pass: %s", ex.what());
+    RCLCPP_ERROR(getLogger(), "Sanity checks did not pass: %s", ex.what());
   }
   EXPECT_TRUE(passed);
 }

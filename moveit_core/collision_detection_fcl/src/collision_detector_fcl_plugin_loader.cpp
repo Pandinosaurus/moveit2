@@ -34,14 +34,14 @@
 
 /* Author: Bryce Willey */
 
-#include <moveit/collision_detection_fcl/collision_detector_fcl_plugin_loader.h>
+#include <moveit/collision_detection_fcl/collision_detector_fcl_plugin_loader.hpp>
 #include <pluginlib/class_list_macros.hpp>
 
 namespace collision_detection
 {
 bool CollisionDetectorFCLPluginLoader::initialize(const planning_scene::PlanningScenePtr& scene) const
 {
-  scene->setCollisionDetectorType(CollisionDetectorAllocatorFCL::create());
+  scene->allocateCollisionDetector(CollisionDetectorAllocatorFCL::create());
   return true;
 }
 }  // namespace collision_detection

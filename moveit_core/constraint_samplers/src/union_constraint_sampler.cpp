@@ -34,13 +34,22 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/constraint_samplers/union_constraint_sampler.h>
-#include <moveit/constraint_samplers/default_constraint_samplers.h>
+#include <moveit/constraint_samplers/union_constraint_sampler.hpp>
+#include <moveit/constraint_samplers/default_constraint_samplers.hpp>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
 #include <algorithm>
+#include <moveit/utils/logger.hpp>
 
 namespace constraint_samplers
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_constraint_samplers.union_constraint_sampler");
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.core.union_constraint_sampler");
+}
+}  // namespace
 
 struct OrderSamplers
 {
@@ -67,22 +76,30 @@ struct OrderSamplers
     const std::vector<std::string>& fda = a->getFrameDependency();
     const std::vector<std::string>& fdb = b->getFrameDependency();
     for (std::size_t i = 0; i < fda.size() && !a_depends_on_b; ++i)
+    {
       for (const std::string& blink : blinks)
+      {
         if (blink == fda[i])
         {
           a_depends_on_b = true;
           break;
         }
+      }
+    }
     for (std::size_t i = 0; i < fdb.size() && !b_depends_on_a; ++i)
+    {
       for (const std::string& alink : alinks)
+      {
         if (alink == fdb[i])
         {
           b_depends_on_a = true;
           break;
         }
+      }
+    }
     if (b_depends_on_a && a_depends_on_b)
     {
-      RCLCPP_WARN(LOGGER,
+      RCLCPP_WARN(getLogger(),
                   "Circular frame dependency! "
                   "Sampling will likely produce invalid results (sampling for groups '%s' and '%s')",
                   a->getJointModelGroup()->getName().c_str(), b->getJointModelGroup()->getName().c_str());
@@ -120,7 +137,7 @@ UnionConstraintSampler::UnionConstraintSampler(const planning_scene::PlanningSce
     for (const std::string& fd : fds)
       frame_depends_.push_back(fd);
 
-    RCLCPP_DEBUG(LOGGER, "Union sampler for group '%s' includes sampler for group '%s'", jmg_->getName().c_str(),
+    RCLCPP_DEBUG(getLogger(), "Union sampler for group '%s' includes sampler for group '%s'", jmg_->getName().c_str(),
                  sampler->getJointModelGroup()->getName().c_str());
   }
 }
@@ -129,35 +146,13 @@ bool UnionConstraintSampler::sample(moveit::core::RobotState& state, const movei
                                     unsigned int max_attempts)
 {
   state = reference_state;
-  state.setToRandomPositions(jmg_);
-
-  if (!samplers_.empty())
-  {
-    if (!samplers_[0]->sample(state, reference_state, max_attempts))
-      return false;
-  }
-
-  for (std::size_t i = 1; i < samplers_.size(); ++i)
+  for (ConstraintSamplerPtr& sampler : samplers_)
   {
     // ConstraintSampler::sample returns states with dirty link transforms (because it only writes values)
     // but requires a state with clean link transforms as input. This means that we need to clean the link
     // transforms between calls to ConstraintSampler::sample.
     state.updateLinkTransforms();
-    if (!samplers_[i]->sample(state, state, max_attempts))
-      return false;
-  }
-  return true;
-}
-
-bool UnionConstraintSampler::project(moveit::core::RobotState& state, unsigned int max_attempts)
-{
-  for (ConstraintSamplerPtr& sampler : samplers_)
-  {
-    // ConstraintSampler::project returns states with dirty link transforms (because it only writes values)
-    // but requires a state with clean link transforms as input. This means that we need to clean the link
-    // transforms between calls to ConstraintSampler::sample.
-    state.updateLinkTransforms();
-    if (!sampler->project(state, max_attempts))
+    if (!sampler->sample(state, max_attempts))
       return false;
   }
   return true;

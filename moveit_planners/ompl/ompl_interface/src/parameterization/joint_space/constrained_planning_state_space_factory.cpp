@@ -35,8 +35,8 @@
 /* Author: Jeroen De Maeyer */
 /* Mostly copied from Ioan Sucan's code */
 
-#include <moveit/ompl_interface/parameterization/joint_space/constrained_planning_state_space.h>
-#include <moveit/ompl_interface/parameterization/joint_space/constrained_planning_state_space_factory.h>
+#include <moveit/ompl_interface/parameterization/joint_space/constrained_planning_state_space.hpp>
+#include <moveit/ompl_interface/parameterization/joint_space/constrained_planning_state_space_factory.hpp>
 
 namespace ompl_interface
 {
@@ -46,10 +46,18 @@ ConstrainedPlanningStateSpaceFactory::ConstrainedPlanningStateSpaceFactory() : M
 }
 
 int ConstrainedPlanningStateSpaceFactory::canRepresentProblem(
-    const std::string& /*group*/, const moveit_msgs::msg::MotionPlanRequest& /*req*/,
+    const std::string& /*group*/, const moveit_msgs::msg::MotionPlanRequest& req,
     const moveit::core::RobotModelConstPtr& /*robot_model*/) const
 {
-  // Return the lowest priority currently existing in the ompl interface.
+  // If we have exactly one position or orientation constraint, prefer the constrained planning state space
+  auto num_constraints =
+      req.path_constraints.position_constraints.size() + req.path_constraints.orientation_constraints.size();
+  if (num_constraints == 1 && req.path_constraints.joint_constraints.empty() &&
+      req.path_constraints.visibility_constraints.empty())
+  {
+    return 200;
+  }
+  // Otherwise, return the lowest priority currently existing in the ompl interface.
   // This state space will only be selected if it is the only option to choose from.
   // See header file for more info.
   return -2;

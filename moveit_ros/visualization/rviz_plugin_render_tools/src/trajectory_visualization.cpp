@@ -36,15 +36,14 @@
 
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/replace.hpp>
-#include <boost/lexical_cast.hpp>
 
-#include <moveit/rviz_plugin_render_tools/trajectory_visualization.h>
+#include <moveit/rviz_plugin_render_tools/trajectory_visualization.hpp>
 
-#include <moveit/rviz_plugin_render_tools/planning_link_updater.h>
-#include <moveit/rviz_plugin_render_tools/robot_state_visualization.h>
+#include <moveit/rviz_plugin_render_tools/planning_link_updater.hpp>
+#include <moveit/rviz_plugin_render_tools/robot_state_visualization.hpp>
 #include <rviz_default_plugins/robot/robot.hpp>
-
-#include <moveit/trajectory_processing/trajectory_tools.h>
+#include <moveit/utils/logger.hpp>
+#include <moveit/trajectory_processing/trajectory_tools.hpp>
 #include <rviz_common/display_context.hpp>
 #include <rviz_common/properties/bool_property.hpp>
 #include <rviz_common/properties/color_property.hpp>
@@ -57,11 +56,12 @@
 #include <rviz_default_plugins/robot/robot_link.hpp>
 #include <rviz_common/window_manager_interface.hpp>
 
+#include <string>
+
 using namespace std::placeholders;
 
 namespace moveit_rviz_plugin
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_rviz_plugin_render_tools.trajectory_visualization");
 
 TrajectoryVisualization::TrajectoryVisualization(rviz_common::properties::Property* widget,
                                                  rviz_common::Display* display)
@@ -72,6 +72,7 @@ TrajectoryVisualization::TrajectoryVisualization(rviz_common::properties::Proper
   , widget_(widget)
   , trajectory_slider_panel_(nullptr)
   , trajectory_slider_dock_panel_(nullptr)
+  , logger_(moveit::getLogger("moveit.ros.trajectory_visualization"))
 {
   trajectory_topic_property_ = new rviz_common::properties::RosTopicProperty(
       "Trajectory Topic", "/display_planned_path",
@@ -97,14 +98,20 @@ TrajectoryVisualization::TrajectoryVisualization(rviz_common::properties::Proper
   robot_path_alpha_property_->setMax(1.0);
 
   state_display_time_property_ =
-      new rviz_common::properties::EditableEnumProperty("State Display Time", "0.05 s",
-                                                        "The amount of wall-time to wait in between displaying "
-                                                        "states along a received trajectory path",
+      new rviz_common::properties::EditableEnumProperty("State Display Time", "3x",
+                                                        "Replay speed of trajectory. Either as factor of its time"
+                                                        "parameterization or as constant time (s) per waypoint.",
                                                         widget, SLOT(changedStateDisplayTime()), this);
-  state_display_time_property_->addOptionStd("REALTIME");
-  state_display_time_property_->addOptionStd("0.05 s");
-  state_display_time_property_->addOptionStd("0.1 s");
-  state_display_time_property_->addOptionStd("0.5 s");
+  state_display_time_property_->addOptionStd("3x");
+  state_display_time_property_->addOptionStd("1x");
+  state_display_time_property_->addOptionStd("0.5x");
+  state_display_time_property_->addOptionStd("0.05s");
+  state_display_time_property_->addOptionStd("0.1s");
+  state_display_time_property_->addOptionStd("0.5s");
+
+  use_sim_time_property_ = new rviz_common::properties::BoolProperty(
+      "Use Sim Time", false, "Indicates whether simulation time or wall-time is used for state display timing.", widget,
+      nullptr, this);
 
   loop_display_property_ = new rviz_common::properties::BoolProperty("Loop Animation", false,
                                                                      "Indicates whether the last received path "
@@ -159,7 +166,7 @@ void TrajectoryVisualization::onInitialize(const rclcpp::Node::SharedPtr& node, 
   trajectory_topic_property_->initialize(ros_node_abstraction);
 
   // Load trajectory robot
-  display_path_robot_.reset(new RobotStateVisualization(scene_node_, context_, "Planned Path", widget_));
+  display_path_robot_ = std::make_shared<RobotStateVisualization>(scene_node_, context_, "Planned Path", widget_);
   display_path_robot_->setVisualVisible(display_path_visual_enabled_property_->getBool());
   display_path_robot_->setCollisionVisible(display_path_collision_enabled_property_->getBool());
   display_path_robot_->setVisible(false);
@@ -177,8 +184,8 @@ void TrajectoryVisualization::onInitialize(const rclcpp::Node::SharedPtr& node, 
   }
 
   trajectory_topic_sub_ = node_->create_subscription<moveit_msgs::msg::DisplayTrajectory>(
-      trajectory_topic_property_->getStdString(), 2,
-      std::bind(&TrajectoryVisualization::incomingDisplayTrajectory, this, _1));
+      trajectory_topic_property_->getStdString(), rclcpp::SystemDefaultsQoS(),
+      [this](const moveit_msgs::msg::DisplayTrajectory::ConstSharedPtr& msg) { return incomingDisplayTrajectory(msg); });
 }
 
 void TrajectoryVisualization::setName(const QString& name)
@@ -194,12 +201,12 @@ void TrajectoryVisualization::onRobotModelLoaded(const moveit::core::RobotModelC
   // Error check
   if (!robot_model_)
   {
-    RCLCPP_ERROR_STREAM(LOGGER, "No robot model found");
+    RCLCPP_ERROR_STREAM(logger_, "No robot model found");
     return;
   }
 
   // Load robot state
-  robot_state_.reset(new moveit::core::RobotState(robot_model_));
+  robot_state_ = std::make_shared<moveit::core::RobotState>(robot_model_);
   robot_state_->setToDefaultValues();
 
   // Load rviz robot
@@ -249,12 +256,13 @@ void TrajectoryVisualization::changedShowTrail()
 
   int stepsize = trail_step_size_property_->getInt();
   // always include last trajectory point
-  trajectory_trail_.resize((int)std::ceil((t->getWayPointCount() + stepsize - 1) / (float)stepsize));
-  for (std::size_t i = 0; i < trajectory_trail_.size(); i++)
+  trajectory_trail_.resize(
+      static_cast<int>(std::ceil((t->getWayPointCount() + stepsize - 1) / static_cast<float>(stepsize))));
+  for (std::size_t i = 0; i < trajectory_trail_.size(); ++i)
   {
     int waypoint_i = std::min(i * stepsize, t->getWayPointCount() - 1);  // limit to last trajectory point
-    auto r = std::make_unique<RobotStateVisualization>(scene_node_, context_,
-                                                       "Trail Robot " + boost::lexical_cast<std::string>(i), nullptr);
+    auto r =
+        std::make_unique<RobotStateVisualization>(scene_node_, context_, "Trail Robot " + std::to_string(i), nullptr);
     r->load(*robot_model_->getURDF());
     r->setVisualVisible(display_path_visual_enabled_property_->getBool());
     r->setCollisionVisible(display_path_collision_enabled_property_->getBool());
@@ -286,8 +294,10 @@ void TrajectoryVisualization::changedTrajectoryTopic()
   if (!trajectory_topic_property_->getStdString().empty() && robot_state_)
   {
     trajectory_topic_sub_ = node_->create_subscription<moveit_msgs::msg::DisplayTrajectory>(
-        trajectory_topic_property_->getStdString(), 2,
-        std::bind(&TrajectoryVisualization::incomingDisplayTrajectory, this, _1));
+        trajectory_topic_property_->getStdString(), rclcpp::SystemDefaultsQoS(),
+        [this](const moveit_msgs::msg::DisplayTrajectory::ConstSharedPtr& msg) {
+          return incomingDisplayTrajectory(msg);
+        });
   }
 }
 
@@ -354,26 +364,51 @@ void TrajectoryVisualization::interruptCurrentDisplay()
     animating_path_ = false;
 }
 
-float TrajectoryVisualization::getStateDisplayTime()
+double TrajectoryVisualization::getStateDisplayTime()
 {
+  constexpr char default_time_string[] = "3x";
+  constexpr double default_time_value = -3.0;
+
   std::string tm = state_display_time_property_->getStdString();
-  if (tm == "REALTIME")
-    return -1.0;
+  boost::trim(tm);
+
+  double type;
+
+  if (tm.back() == 'x')
+  {
+    type = -1.0f;
+  }
+  else if (tm.back() == 's')
+  {
+    type = 1.0f;
+  }
   else
   {
-    boost::replace_all(tm, "s", "");
-    boost::trim(tm);
-    float t = 0.05f;
-    try
-    {
-      t = boost::lexical_cast<float>(tm);
-    }
-    catch (const boost::bad_lexical_cast& ex)
-    {
-      state_display_time_property_->setStdString("0.05 s");
-    }
-    return t;
+    state_display_time_property_->setStdString(default_time_string);
+    return default_time_value;
   }
+
+  tm.resize(tm.size() - 1);
+  boost::trim_right(tm);
+
+  double value;
+  try
+  {
+    value = std::stof(tm);
+  }
+  catch (const std::invalid_argument& ex)
+  {
+    state_display_time_property_->setStdString(default_time_string);
+    return default_time_value;
+  }
+
+  if (value <= 0)
+  {
+    state_display_time_property_->setStdString(default_time_string);
+    return default_time_value;
+  }
+
+  return type * value;
 }
 
 void TrajectoryVisualization::dropTrajectory()
@@ -381,7 +416,7 @@ void TrajectoryVisualization::dropTrajectory()
   drop_displaying_trajectory_ = true;
 }
 
-void TrajectoryVisualization::update(float wall_dt, float /*ros_dt*/)
+void TrajectoryVisualization::update(double wall_dt, double sim_dt)
 {
   if (drop_displaying_trajectory_)
   {
@@ -392,7 +427,7 @@ void TrajectoryVisualization::update(float wall_dt, float /*ros_dt*/)
   }
   if (!animating_path_)
   {  // finished last animation?
-    boost::mutex::scoped_lock lock(update_trajectory_message_);
+    std::scoped_lock lock(update_trajectory_message_);
 
     // new trajectory available to display?
     if (trajectory_message_to_display_ && !trajectory_message_to_display_->empty())
@@ -413,9 +448,13 @@ void TrajectoryVisualization::update(float wall_dt, float /*ros_dt*/)
       {
         if (static_cast<unsigned int>(trajectory_slider_panel_->getSliderPosition()) >=
             displaying_trajectory_message_->getWayPointCount() - 1)
+        {
           return;  // nothing more to do
+        }
         else
+        {
           animating_path_ = true;
+        }
       }
     }
     trajectory_message_to_display_.reset();
@@ -431,8 +470,15 @@ void TrajectoryVisualization::update(float wall_dt, float /*ros_dt*/)
   {
     int previous_state = current_state_;
     int waypoint_count = displaying_trajectory_message_->getWayPointCount();
-    current_state_time_ += wall_dt;
-    float tm = getStateDisplayTime();
+    if (use_sim_time_property_->getBool())
+    {
+      current_state_time_ += sim_dt;
+    }
+    else
+    {
+      current_state_time_ += wall_dt;
+    }
+    double tm = getStateDisplayTime();
 
     if (trajectory_slider_panel_ && trajectory_slider_panel_->isVisible() && trajectory_slider_panel_->isPaused())
     {
@@ -445,13 +491,16 @@ void TrajectoryVisualization::update(float wall_dt, float /*ros_dt*/)
       current_state_time_ = 0.0;
     }
     else if (tm < 0.0)
-    {  // using realtime: skip to next waypoint based on elapsed display time
-      while (current_state_ < waypoint_count && (tm = displaying_trajectory_message_->getWayPointDurationFromPrevious(
-                                                     current_state_ + 1)) < current_state_time_)
+    {
+      // using realtime factors: skip to next waypoint based on elapsed display time
+      const double rt_factor = -tm;  // negative tm is the intended realtime factor
+      while (current_state_ < waypoint_count &&
+             (tm = displaying_trajectory_message_->getWayPointDurationFromPrevious(current_state_ + 1) / rt_factor) <
+                 current_state_time_)
       {
         current_state_time_ -= tm;
-        if (tm < current_state_time_)  // if we are stuck in the while loop we should
-                                       // move the robot along the path to keep up
+        // if we are stuck in the while loop we should move the robot along the path to keep up
+        if (tm < current_state_time_)
           display_path_robot_->update(displaying_trajectory_message_->getWayPointPtr(current_state_));
         ++current_state_;
       }
@@ -471,15 +520,19 @@ void TrajectoryVisualization::update(float wall_dt, float /*ros_dt*/)
         trajectory_slider_panel_->setSliderPosition(current_state_);
       display_path_robot_->update(displaying_trajectory_message_->getWayPointPtr(current_state_));
       for (std::size_t i = 0; i < trajectory_trail_.size(); ++i)
+      {
         trajectory_trail_[i]->setVisible(
             std::min(waypoint_count - 1, static_cast<int>(i) * trail_step_size_property_->getInt()) <= current_state_);
+      }
     }
     else
     {
-      animating_path_ = false;       // animation finished
-      if (trajectory_slider_panel_)  // make sure we move the slider to the end
-                                     // so the user can re-play
+      animating_path_ = false;  // animation finished
+      if (trajectory_slider_panel_)
+      {  // make sure we move the slider to the end
+         // so the user can re-play
         trajectory_slider_panel_->setSliderPosition(waypoint_count);
+      }
       display_path_robot_->update(displaying_trajectory_message_->getWayPointPtr(waypoint_count - 1));
       display_path_robot_->setVisible(loop_display_property_->getBool());
       if (!loop_display_property_->getBool() && trajectory_slider_panel_)
@@ -492,22 +545,24 @@ void TrajectoryVisualization::update(float wall_dt, float /*ros_dt*/)
                                    (trajectory_slider_panel_ && trajectory_slider_panel_->isVisible())));
 }
 
-void TrajectoryVisualization::incomingDisplayTrajectory(const moveit_msgs::msg::DisplayTrajectory::ConstSharedPtr msg)
+void TrajectoryVisualization::incomingDisplayTrajectory(const moveit_msgs::msg::DisplayTrajectory::ConstSharedPtr& msg)
 {
   // Error check
   if (!robot_state_ || !robot_model_)
   {
-    RCLCPP_ERROR_STREAM(LOGGER, "No robot state or robot model loaded");
+    RCLCPP_ERROR_STREAM(logger_, "No robot state or robot model loaded");
     return;
   }
 
   if (!msg->model_id.empty() && msg->model_id != robot_model_->getName())
-    RCLCPP_WARN(LOGGER, "Received a trajectory to display for model '%s' but model '%s' was expected",
+  {
+    RCLCPP_WARN(logger_, "Received a trajectory to display for model '%s' but model '%s' was expected",
                 msg->model_id.c_str(), robot_model_->getName().c_str());
+  }
 
   trajectory_message_to_display_.reset();
 
-  robot_trajectory::RobotTrajectoryPtr t(new robot_trajectory::RobotTrajectory(robot_model_, ""));
+  auto t = std::make_shared<robot_trajectory::RobotTrajectory>(robot_model_, "");
   try
   {
     for (std::size_t i = 0; i < msg->trajectory.size(); ++i)
@@ -533,7 +588,7 @@ void TrajectoryVisualization::incomingDisplayTrajectory(const moveit_msgs::msg::
 
   if (!t->empty())
   {
-    boost::mutex::scoped_lock lock(update_trajectory_message_);
+    std::scoped_lock lock(update_trajectory_message_);
     trajectory_message_to_display_.swap(t);
     if (interrupt_display_property_->getBool())
       interruptCurrentDisplay();
@@ -549,9 +604,13 @@ void TrajectoryVisualization::changedRobotColor()
 void TrajectoryVisualization::enabledRobotColor()
 {
   if (enable_robot_color_property_->getBool())
+  {
     setRobotColor(&(display_path_robot_->getRobot()), robot_color_property_->getColor());
+  }
   else
+  {
     unsetRobotColor(&(display_path_robot_->getRobot()));
+  }
 }
 
 void TrajectoryVisualization::unsetRobotColor(rviz_default_plugins::robot::Robot* robot)
@@ -588,9 +647,19 @@ void TrajectoryVisualization::trajectorySliderPanelVisibilityChange(bool enable)
     return;
 
   if (enable)
+  {
     trajectory_slider_panel_->onEnable();
+  }
   else
+  {
     trajectory_slider_panel_->onDisable();
+  }
+}
+
+void TrajectoryVisualization::clearRobotModel()
+{
+  robot_model_.reset();
+  robot_state_.reset();
 }
 
 }  // namespace moveit_rviz_plugin

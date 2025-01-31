@@ -33,8 +33,8 @@
  *********************************************************************/
 
 #include <gtest/gtest.h>
-#include <moveit/mesh_filter/mesh_filter.h>
-#include <moveit/mesh_filter/stereo_camera_model.h>
+#include <moveit/mesh_filter/mesh_filter.hpp>
+#include <moveit/mesh_filter/stereo_camera_model.hpp>
 #include <geometric_shapes/shapes.h>
 #include <geometric_shapes/shape_operations.h>
 #include <eigen3/Eigen/Eigen>
@@ -43,7 +43,7 @@
 using namespace mesh_filter;
 using namespace Eigen;
 using namespace std;
-using namespace boost;
+using namespace std::placeholders;
 
 namespace mesh_filter_test
 {
@@ -65,7 +65,7 @@ class FilterTraits<unsigned short>
 {
 public:
   static const GLushort FILTER_GL_TYPE = GL_UNSIGNED_SHORT;
-  static constexpr double ToMetricScale = 0.001;
+  static constexpr double TO_METRIC_SCALE = 0.001;
 };
 
 template <>
@@ -73,14 +73,14 @@ class FilterTraits<float>
 {
 public:
   static const GLushort FILTER_GL_TYPE = GL_FLOAT;
-  static constexpr double ToMetricScale = 1.0f;
+  static constexpr double TO_METRIC_SCALE = 1.0f;
 };
 
 template <typename Type>
 class MeshFilterTest : public testing::TestWithParam<double>
 {
-  BOOST_STATIC_ASSERT_MSG(FilterTraits<Type>::FILTER_GL_TYPE != GL_ZERO, "Only \"float\" and \"unsigned short int\" "
-                                                                         "are allowed.");
+  static_assert(FilterTraits<Type>::FILTER_GL_TYPE != GL_ZERO, "Only \"float\" and \"unsigned short int\" "
+                                                               "are allowed.");
 
 public:
   MeshFilterTest(unsigned width = 500, unsigned height = 500, double near = 0.5, double far = 5.0, double shadow = 0.1,
@@ -118,7 +118,8 @@ MeshFilterTest<Type>::MeshFilterTest(unsigned width, unsigned height, double nea
   , shadow_(shadow)
   , epsilon_(epsilon)
   , sensor_parameters_(width, height, near_, far_, width >> 1, height >> 1, width >> 1, height >> 1, 0.1, 0.1)
-  , filter_(boost::bind(&MeshFilterTest<Type>::transformCallback, this, _1, _2), sensor_parameters_)
+  , filter_([this](mesh_filter::MeshHandle mesh, Eigen::Isometry3d& tf) { return transformCallback(mesh, tf); },
+            sensor_parameters_)
   , sensor_data_(width_ * height_)
   , distance_(0.0)
 {
@@ -132,15 +133,15 @@ MeshFilterTest<Type>::MeshFilterTest(unsigned width, unsigned height, double nea
   shapes::Mesh mesh = createMesh(0);
   handle_ = filter_.addMesh(mesh);
 
-  // make it random but reproducable
+  // make it random but reproducible
   srand(0);
-  Type t_near = near_ / FilterTraits<Type>::ToMetricScale;
-  Type t_far = far_ / FilterTraits<Type>::ToMetricScale;
+  Type t_near = near_ / FilterTraits<Type>::TO_METRIC_SCALE;
+  Type t_far = far_ / FilterTraits<Type>::TO_METRIC_SCALE;
   for (typename vector<Type>::iterator s_it = sensor_data_.begin(); s_it != sensor_data_.end(); ++s_it)
   {
     do
     {
-      *s_it = getRandomNumber<Type>(0.0, 10.0 / FilterTraits<Type>::ToMetricScale);
+      *s_it = getRandomNumber<Type>(0.0, 10.0 / FilterTraits<Type>::TO_METRIC_SCALE);
     } while (*s_it == t_near || *s_it == t_far);
   }
 }
@@ -228,7 +229,7 @@ void MeshFilterTest<Type>::test()
   for (unsigned idx = 0; idx < width_ * height_; ++idx)
   {
     // Only test if we are not very close to boundaries of object meshes and shadow-boundaries.
-    float sensor_depth = sensor_data_[idx] * FilterTraits<Type>::ToMetricScale;
+    float sensor_depth = sensor_data_[idx] * FilterTraits<Type>::TO_METRIC_SCALE;
     if (fabs(sensor_depth - distance_ - shadow_) > epsilon_ && fabs(sensor_depth - distance_) > epsilon_)
     {
       ASSERT_NEAR(filtered_depth[idx], gt_depth[idx], 1e-4);
@@ -241,7 +242,7 @@ void MeshFilterTest<Type>::test()
 template <typename Type>
 void MeshFilterTest<Type>::getGroundTruth(unsigned int* labels, float* depth) const
 {
-  const double scale = FilterTraits<Type>::ToMetricScale;
+  const double scale = FilterTraits<Type>::TO_METRIC_SCALE;
   if (distance_ <= near_ || distance_ >= far_)
   {
     // no filtering is done -> no shadow values or label values

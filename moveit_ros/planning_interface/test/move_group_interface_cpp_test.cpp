@@ -36,13 +36,14 @@
 /* Author: Tyler Weaver, Boston Cleek */
 
 /* These integration tests are based on the tutorials for using move_group:
- * https://ros-planning.github.io/moveit_tutorials/doc/move_group_interface/move_group_interface_tutorial.html
+ * https://moveit.github.io/moveit_tutorials/doc/move_group_interface/move_group_interface_tutorial.html
  */
 
 // C++
 #include <string>
 #include <vector>
 #include <map>
+#include <future>
 
 // ROS
 #include <ros/ros.h>
@@ -51,14 +52,16 @@
 #include <gtest/gtest.h>
 
 // MoveIt
-#include <moveit/planning_scene_interface/planning_scene_interface.h>
-#include <moveit/move_group_interface/move_group_interface.h>
+#include <moveit/planning_scene_interface/planning_scene_interface.hpp>
+#include <moveit/move_group_interface/move_group_interface.hpp>
+#include <moveit/common_planning_interface_objects/common_objects.hpp>
+#include <moveit/planning_scene_monitor/planning_scene_monitor.hpp>
 
 // TF2
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
-#include <eigen_conversions/eigen_msg.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <tf2_eigen/tf2_eigen.hpp>
 
-// 10um acuracy tested for position and orientation
+// 10um accuracy tested for position and orientation
 constexpr double EPSILON = 1e-5;
 
 static const std::string PLANNING_GROUP = "panda_arm";
@@ -84,6 +87,32 @@ public:
 
     // set the tolerance for the goals to be smaller than epsilon
     move_group_->setGoalTolerance(GOAL_TOLERANCE);
+
+    /* the tf buffer is not strictly needed,
+       but it's a simple way to add the codepaths to the tests */
+    psm_ = std::make_shared<planning_scene_monitor::PlanningSceneMonitor>("robot_description",
+                                                                          moveit::planning_interface::getSharedTF());
+    psm_->startSceneMonitor("/move_group/monitored_planning_scene");
+    psm_->requestPlanningSceneState();
+
+    // give move_group_, planning_scene_interface_ and psm_ time to connect their topics
+    ros::Duration(0.5).sleep();
+  }
+
+  // run updater() and ensure at least one geometry update was processed by the `move_group` node after doing so
+  void synchronizeGeometryUpdate(const std::function<void()>& updater)
+  {
+    SCOPED_TRACE("synchronizeGeometryUpdate");
+    std::promise<void> promise;
+    std::future<void> future = promise.get_future();
+    psm_->addUpdateCallback([this, &promise](planning_scene_monitor::PlanningSceneMonitor::SceneUpdateType t) {
+      if (t & planning_scene_monitor::PlanningSceneMonitor::UPDATE_GEOMETRY)
+        promise.set_value();
+      psm_->clearUpdateCallbacks();
+    });
+    updater();
+    // the updater must have triggered a geometry update, otherwise we can't be sure about the state of the scene anymore
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
   }
 
   void planAndMoveToPose(const geometry_msgs::Pose& pose)
@@ -97,8 +126,8 @@ public:
   {
     SCOPED_TRACE("planAndMove");
     moveit::planning_interface::MoveGroupInterface::Plan my_plan;
-    ASSERT_EQ(move_group_->plan(my_plan), moveit::planning_interface::MoveItErrorCode::SUCCESS);
-    ASSERT_EQ(move_group_->move(), moveit::planning_interface::MoveItErrorCode::SUCCESS);
+    ASSERT_EQ(move_group_->plan(my_plan), moveit::core::MoveItErrorCode::SUCCESS);
+    ASSERT_EQ(move_group_->move(), moveit::core::MoveItErrorCode::SUCCESS);
   }
 
   void testEigenPose(const Eigen::Isometry3d& expected, const Eigen::Isometry3d& actual)
@@ -115,7 +144,7 @@ public:
     // get the pose of the end effector link after the movement
     geometry_msgs::PoseStamped actual_pose_stamped = move_group_->getCurrentPose();
     Eigen::Isometry3d actual_pose;
-    tf::poseMsgToEigen(actual_pose_stamped.pose, actual_pose);
+    tf2::fromMsg(actual_pose_stamped.pose, actual_pose);
 
     // compare to planned pose
     testEigenPose(expected_pose, actual_pose);
@@ -125,7 +154,7 @@ public:
   {
     SCOPED_TRACE("testPose(const geometry_msgs::Pose&)");
     Eigen::Isometry3d expected_pose;
-    tf::poseMsgToEigen(expected_pose_msg, expected_pose);
+    tf2::fromMsg(expected_pose_msg, expected_pose);
     testPose(expected_pose);
   }
 
@@ -148,6 +177,7 @@ protected:
   ros::NodeHandle nh_;
   moveit::planning_interface::MoveGroupInterfacePtr move_group_;
   moveit::planning_interface::PlanningSceneInterface planning_scene_interface_;
+  planning_scene_monitor::PlanningSceneMonitorPtr psm_;
 };
 
 TEST_F(MoveGroupTestFixture, PathConstraintCollisionTest)
@@ -156,7 +186,7 @@ TEST_F(MoveGroupTestFixture, PathConstraintCollisionTest)
 
   ////////////////////////////////////////////////////////////////////
   // set a custom start state
-  // this simplifies planning for the orientation constraint bellow
+  // this simplifies planning for the orientation constraint below
   geometry_msgs::Pose start_pose;
   start_pose.orientation.w = 1.0;
   start_pose.position.x = 0.3;
@@ -174,13 +204,13 @@ TEST_F(MoveGroupTestFixture, PathConstraintCollisionTest)
 
   // convert to eigen
   Eigen::Isometry3d eigen_target_pose;
-  tf::poseMsgToEigen(target_pose, eigen_target_pose);
+  tf2::fromMsg(target_pose, eigen_target_pose);
 
   // set with eigen, get ros message representation
   move_group_->setPoseTarget(eigen_target_pose);
   geometry_msgs::PoseStamped set_target_pose = move_group_->getPoseTarget();
   Eigen::Isometry3d eigen_set_target_pose;
-  tf::poseMsgToEigen(set_target_pose.pose, eigen_set_target_pose);
+  tf2::fromMsg(set_target_pose.pose, eigen_set_target_pose);
 
   // expect that they are identical
   testEigenPose(eigen_target_pose, eigen_set_target_pose);
@@ -199,6 +229,23 @@ TEST_F(MoveGroupTestFixture, PathConstraintCollisionTest)
   test_constraints.orientation_constraints.push_back(ocm);
   move_group_->setPathConstraints(test_constraints);
 
+  ////////////////////////////////////////////////////////////////////
+  // plan and move
+  planAndMove();
+
+  // get the pose after the movement
+  testPose(eigen_target_pose);
+
+  // clear path constraints
+  move_group_->clearPathConstraints();
+
+  // move back to ready pose
+  move_group_->setNamedTarget("ready");
+  planAndMove();
+}
+
+TEST_F(MoveGroupTestFixture, ModifyPlanningSceneAsyncInterfaces)
+{
   ////////////////////////////////////////////////////////////////////
   // Define a collision object ROS message.
   moveit_msgs::CollisionObject collision_object;
@@ -230,28 +277,18 @@ TEST_F(MoveGroupTestFixture, PathConstraintCollisionTest)
   collision_objects.push_back(collision_object);
 
   // Now, let's add the collision object into the world
-  planning_scene_interface_.addCollisionObjects(collision_objects);
-
-  ////////////////////////////////////////////////////////////////////
-  // plan and move
-  planAndMove();
-
-  // get the pose after the movement
-  testPose(eigen_target_pose);
-
-  // clear path constraints
-  move_group_->clearPathConstraints();
+  synchronizeGeometryUpdate([&]() { planning_scene_interface_.addCollisionObjects(collision_objects); });
 
   // attach and detach collision object
-  EXPECT_TRUE(move_group_->attachObject(collision_object.id));
+  synchronizeGeometryUpdate([&]() { EXPECT_TRUE(move_group_->attachObject(collision_object.id)); });
   EXPECT_EQ(planning_scene_interface_.getAttachedObjects().size(), std::size_t(1));
-  EXPECT_TRUE(move_group_->detachObject(collision_object.id));
+  synchronizeGeometryUpdate([&]() { EXPECT_TRUE(move_group_->detachObject(collision_object.id)); });
   EXPECT_EQ(planning_scene_interface_.getAttachedObjects().size(), std::size_t(0));
 
   // remove object from world
   const std::vector<std::string> object_ids = { collision_object.id };
   EXPECT_EQ(planning_scene_interface_.getObjects().size(), std::size_t(1));
-  planning_scene_interface_.removeCollisionObjects(object_ids);
+  synchronizeGeometryUpdate([&]() { planning_scene_interface_.removeCollisionObjects(object_ids); });
   EXPECT_EQ(planning_scene_interface_.getObjects().size(), std::size_t(0));
 }
 
@@ -278,12 +315,13 @@ TEST_F(MoveGroupTestFixture, CartPathTest)
   waypoints.push_back(target_waypoint);  // up and left
 
   moveit_msgs::RobotTrajectory trajectory;
-  const auto jump_threshold = 0.0;
   const auto eef_step = 0.01;
-  move_group_->computeCartesianPath(waypoints, eef_step, jump_threshold, trajectory);
+
+  // test below is meaningless if Cartesian planning did not succeed
+  ASSERT_GE(EPSILON + move_group_->computeCartesianPath(waypoints, eef_step, trajectory), 1.0);
 
   // Execute trajectory
-  EXPECT_EQ(move_group_->execute(trajectory), moveit::planning_interface::MoveItErrorCode::SUCCESS);
+  EXPECT_EQ(move_group_->execute(trajectory), moveit::core::MoveItErrorCode::SUCCESS);
 
   // get the pose after the movement
   testPose(target_waypoint);

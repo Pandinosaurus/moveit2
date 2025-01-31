@@ -34,13 +34,15 @@
 
 /* Author: Suat Gedikli */
 
-#include <moveit/mesh_filter/mesh_filter_base.h>
-#include <moveit/mesh_filter/gl_mesh.h>
-#include <moveit/mesh_filter/filter_job.h>
+#include <moveit/mesh_filter/mesh_filter_base.hpp>
+#include <moveit/mesh_filter/gl_mesh.hpp>
+#include <moveit/mesh_filter/filter_job.hpp>
 
 #include <geometric_shapes/shapes.h>
 #include <geometric_shapes/shape_operations.h>
 #include <Eigen/Eigen>
+
+#include <memory>
 #include <stdexcept>
 #include <sstream>
 
@@ -64,8 +66,10 @@ mesh_filter::MeshFilterBase::MeshFilterBase(const TransformCallback& transform_c
   , padding_offset_(0.01)
   , shadow_threshold_(0.5)
 {
-  filter_thread_ = boost::thread(boost::bind(&MeshFilterBase::run, this, render_vertex_shader, render_fragment_shader,
-                                             filter_vertex_shader, filter_fragment_shader));
+  filter_thread_ =
+      std::thread([this, render_vertex_shader, render_fragment_shader, filter_vertex_shader, filter_fragment_shader] {
+        run(render_vertex_shader, render_fragment_shader, filter_vertex_shader, filter_fragment_shader);
+      });
 }
 
 void mesh_filter::MeshFilterBase::initialize(const std::string& render_vertex_shader,
@@ -73,12 +77,12 @@ void mesh_filter::MeshFilterBase::initialize(const std::string& render_vertex_sh
                                              const std::string& filter_vertex_shader,
                                              const std::string& filter_fragment_shader)
 {
-  mesh_renderer_.reset(new GLRenderer(sensor_parameters_->getWidth(), sensor_parameters_->getHeight(),
-                                      sensor_parameters_->getNearClippingPlaneDistance(),
-                                      sensor_parameters_->getFarClippingPlaneDistance()));
-  depth_filter_.reset(new GLRenderer(sensor_parameters_->getWidth(), sensor_parameters_->getHeight(),
-                                     sensor_parameters_->getNearClippingPlaneDistance(),
-                                     sensor_parameters_->getFarClippingPlaneDistance()));
+  mesh_renderer_ = std::make_shared<GLRenderer>(sensor_parameters_->getWidth(), sensor_parameters_->getHeight(),
+                                                sensor_parameters_->getNearClippingPlaneDistance(),
+                                                sensor_parameters_->getFarClippingPlaneDistance());
+  depth_filter_ = std::make_shared<GLRenderer>(sensor_parameters_->getWidth(), sensor_parameters_->getHeight(),
+                                               sensor_parameters_->getNearClippingPlaneDistance(),
+                                               sensor_parameters_->getFarClippingPlaneDistance());
 
   mesh_renderer_->setShadersFromString(render_vertex_shader, render_fragment_shader);
   depth_filter_->setShadersFromString(filter_vertex_shader, filter_fragment_shader);
@@ -119,7 +123,7 @@ void mesh_filter::MeshFilterBase::initialize(const std::string& render_vertex_sh
 mesh_filter::MeshFilterBase::~MeshFilterBase()
 {
   {
-    boost::unique_lock<boost::mutex> lock(jobs_mutex_);
+    std::unique_lock<std::mutex> lock(jobs_mutex_);
     stop_ = true;
     while (!jobs_queue_.empty())
     {
@@ -134,7 +138,7 @@ mesh_filter::MeshFilterBase::~MeshFilterBase()
 void mesh_filter::MeshFilterBase::addJob(const JobPtr& job) const
 {
   {
-    boost::unique_lock<boost::mutex> _(jobs_mutex_);
+    std::unique_lock<std::mutex> _(jobs_mutex_);
     jobs_queue_.push(job);
   }
   jobs_condition_.notify_one();
@@ -161,38 +165,40 @@ void mesh_filter::MeshFilterBase::setSize(unsigned int width, unsigned int heigh
 
 void mesh_filter::MeshFilterBase::setTransformCallback(const TransformCallback& transform_callback)
 {
-  boost::mutex::scoped_lock _(transform_callback_mutex_);
+  std::unique_lock<std::mutex> _(transform_callback_mutex_);
   transform_callback_ = transform_callback;
 }
 
 mesh_filter::MeshHandle mesh_filter::MeshFilterBase::addMesh(const shapes::Mesh& mesh)
 {
-  boost::mutex::scoped_lock _(meshes_mutex_);
+  std::unique_lock<std::mutex> _(meshes_mutex_);
 
-  JobPtr job(new FilterJob<void>(boost::bind(&MeshFilterBase::addMeshHelper, this, next_handle_, &mesh)));
+  JobPtr job(new FilterJob<void>([this, &mesh] { addMeshHelper(next_handle_, mesh); }));
   addJob(job);
   job->wait();
   mesh_filter::MeshHandle ret = next_handle_;
   const std::size_t sz = min_handle_ + meshes_.size() + 1;
   for (std::size_t i = min_handle_; i < sz; ++i)
+  {
     if (meshes_.find(i) == meshes_.end())
     {
       next_handle_ = i;
       break;
     }
+  }
   min_handle_ = next_handle_;
   return ret;
 }
 
-void mesh_filter::MeshFilterBase::addMeshHelper(MeshHandle handle, const shapes::Mesh* cmesh)
+void mesh_filter::MeshFilterBase::addMeshHelper(MeshHandle handle, const shapes::Mesh& cmesh)
 {
-  meshes_[handle] = GLMeshPtr(new GLMesh(*cmesh, handle));
+  meshes_[handle] = std::make_shared<GLMesh>(cmesh, handle);
 }
 
 void mesh_filter::MeshFilterBase::removeMesh(MeshHandle handle)
 {
-  boost::mutex::scoped_lock _(meshes_mutex_);
-  FilterJob<bool>* remover = new FilterJob<bool>(boost::bind(&MeshFilterBase::removeMeshHelper, this, handle));
+  std::unique_lock<std::mutex> _(meshes_mutex_);
+  FilterJob<bool>* remover = new FilterJob<bool>([this, handle] { return removeMeshHelper(handle); });
   JobPtr job(remover);
   addJob(job);
   job->wait();
@@ -215,19 +221,20 @@ void mesh_filter::MeshFilterBase::setShadowThreshold(float threshold)
 
 void mesh_filter::MeshFilterBase::getModelLabels(LabelType* labels) const
 {
-  JobPtr job(
-      new FilterJob<void>(boost::bind(&GLRenderer::getColorBuffer, mesh_renderer_.get(), (unsigned char*)labels)));
+  JobPtr job(new FilterJob<void>(
+      [&renderer = *mesh_renderer_, labels] { renderer.getColorBuffer(reinterpret_cast<unsigned char*>(labels)); }));
   addJob(job);
   job->wait();
 }
 
 void mesh_filter::MeshFilterBase::getModelDepth(float* depth) const
 {
-  JobPtr job1(new FilterJob<void>(boost::bind(&GLRenderer::getDepthBuffer, mesh_renderer_.get(), depth)));
-  JobPtr job2(new FilterJob<void>(
-      boost::bind(&SensorModel::Parameters::transformModelDepthToMetricDepth, sensor_parameters_.get(), depth)));
+  JobPtr job1 =
+      std::make_shared<FilterJob<void>>([&renderer = *mesh_renderer_, depth] { renderer.getDepthBuffer(depth); });
+  JobPtr job2 = std::make_shared<FilterJob<void>>(
+      [&parameters = *sensor_parameters_, depth] { parameters.transformModelDepthToMetricDepth(depth); });
   {
-    boost::unique_lock<boost::mutex> lock(jobs_mutex_);
+    std::unique_lock<std::mutex> lock(jobs_mutex_);
     jobs_queue_.push(job1);
     jobs_queue_.push(job2);
   }
@@ -238,11 +245,11 @@ void mesh_filter::MeshFilterBase::getModelDepth(float* depth) const
 
 void mesh_filter::MeshFilterBase::getFilteredDepth(float* depth) const
 {
-  JobPtr job1(new FilterJob<void>(boost::bind(&GLRenderer::getDepthBuffer, depth_filter_.get(), depth)));
-  JobPtr job2(new FilterJob<void>(
-      boost::bind(&SensorModel::Parameters::transformFilteredDepthToMetricDepth, sensor_parameters_.get(), depth)));
+  JobPtr job1 = std::make_shared<FilterJob<void>>([&filter = *depth_filter_, depth] { filter.getDepthBuffer(depth); });
+  JobPtr job2 = std::make_shared<FilterJob<void>>(
+      [&parameters = *sensor_parameters_, depth] { parameters.transformFilteredDepthToMetricDepth(depth); });
   {
-    boost::unique_lock<boost::mutex> lock(jobs_mutex_);
+    std::unique_lock<std::mutex> lock(jobs_mutex_);
     jobs_queue_.push(job1);
     jobs_queue_.push(job2);
   }
@@ -253,7 +260,8 @@ void mesh_filter::MeshFilterBase::getFilteredDepth(float* depth) const
 
 void mesh_filter::MeshFilterBase::getFilteredLabels(LabelType* labels) const
 {
-  JobPtr job(new FilterJob<void>(boost::bind(&GLRenderer::getColorBuffer, depth_filter_.get(), (unsigned char*)labels)));
+  JobPtr job = std::make_shared<FilterJob<void>>(
+      [&filter = *depth_filter_, labels] { filter.getColorBuffer(reinterpret_cast<unsigned char*>(labels)); });
   addJob(job);
   job->wait();
 }
@@ -267,7 +275,7 @@ void mesh_filter::MeshFilterBase::run(const std::string& render_vertex_shader,
 
   while (!stop_)
   {
-    boost::unique_lock<boost::mutex> lock(jobs_mutex_);
+    std::unique_lock<std::mutex> lock(jobs_mutex_);
     // check if we have new sensor data to be processed. If not, wait until we get notified.
     if (jobs_queue_.empty())
       jobs_condition_.wait(lock);
@@ -293,7 +301,7 @@ void mesh_filter::MeshFilterBase::filter(const void* sensor_data, GLushort type,
     throw std::runtime_error(msg.str());
   }
 
-  JobPtr job(new FilterJob<void>(boost::bind(&MeshFilterBase::doFilter, this, sensor_data, type)));
+  JobPtr job = std::make_shared<FilterJob<void>>([this, sensor_data, type] { doFilter(sensor_data, type); });
   addJob(job);
   if (wait)
     job->wait();
@@ -301,7 +309,7 @@ void mesh_filter::MeshFilterBase::filter(const void* sensor_data, GLushort type,
 
 void mesh_filter::MeshFilterBase::doFilter(const void* sensor_data, const int encoding) const
 {
-  boost::mutex::scoped_lock _(transform_callback_mutex_);
+  std::unique_lock<std::mutex> _(transform_callback_mutex_);
 
   mesh_renderer_->begin();
   sensor_parameters_->setRenderParameters(*mesh_renderer_);
@@ -321,8 +329,10 @@ void mesh_filter::MeshFilterBase::doFilter(const void* sensor_data, const int en
 
   Eigen::Isometry3d transform;
   for (const std::pair<const MeshHandle, GLMeshPtr>& mesh : meshes_)
+  {
     if (transform_callback_(mesh.first, transform))
       mesh.second->render(transform);
+  }
 
   mesh_renderer_->end();
 
@@ -353,14 +363,18 @@ void mesh_filter::MeshFilterBase::doFilter(const void* sensor_data, const int en
       1.0 / (sensor_parameters_->getFarClippingPlaneDistance() - sensor_parameters_->getNearClippingPlaneDistance());
 
   if (encoding == GL_UNSIGNED_SHORT)
+  {
     // unsigned shorts shorts will be mapped to the range 0-1 during transfer. Afterwards we can apply another scale +
     // offset to
     // map the values between near and far clipping plane to 0 - 1. -> scale = (65535 * depth - near ) / (far - near)
     // we have: [0 - 65535] -> [0 - 1]
     // we want: [near - far] -> [0 - 1]
     glPixelTransferf(GL_DEPTH_SCALE, scale * 65.535);
+  }
   else
+  {
     glPixelTransferf(GL_DEPTH_SCALE, scale);
+  }
   glPixelTransferf(GL_DEPTH_BIAS, -scale * sensor_parameters_->getNearClippingPlaneDistance());
 
   glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, sensor_parameters_->getWidth(), sensor_parameters_->getHeight(), 0,

@@ -34,9 +34,9 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/rviz_plugin_render_tools/planning_scene_render.h>
-#include <moveit/rviz_plugin_render_tools/robot_state_visualization.h>
-#include <moveit/rviz_plugin_render_tools/render_shapes.h>
+#include <moveit/rviz_plugin_render_tools/planning_scene_render.hpp>
+#include <moveit/rviz_plugin_render_tools/robot_state_visualization.hpp>
+#include <moveit/rviz_plugin_render_tools/render_shapes.hpp>
 #include <rviz_common/display_context.hpp>
 
 #include <OgreSceneNode.h>
@@ -48,7 +48,7 @@ PlanningSceneRender::PlanningSceneRender(Ogre::SceneNode* node, rviz_common::Dis
                                          const RobotStateVisualizationPtr& robot)
   : planning_scene_geometry_node_(node->createChildSceneNode()), context_(context), scene_robot_(robot)
 {
-  render_shapes_.reset(new RenderShapes(context));
+  render_shapes_ = std::make_shared<RenderShapes>(context);
 }
 
 PlanningSceneRender::~PlanningSceneRender()
@@ -75,7 +75,7 @@ void PlanningSceneRender::renderPlanningScene(const planning_scene::PlanningScen
                                               const Ogre::ColourValue& default_env_color,
                                               const Ogre::ColourValue& default_attached_color,
                                               OctreeVoxelRenderMode octree_voxel_rendering,
-                                              OctreeVoxelColorMode octree_color_mode, float default_scene_alpha)
+                                              OctreeVoxelColorMode octree_color_mode, double default_scene_alpha)
 {
   if (!scene)
     return;
@@ -91,7 +91,7 @@ void PlanningSceneRender::renderPlanningScene(const planning_scene::PlanningScen
     color.r = default_attached_color.r;
     color.g = default_attached_color.g;
     color.b = default_attached_color.b;
-    color.a = 1.0f;
+    color.a = default_attached_color.a;
     planning_scene::ObjectColorMap color_map;
     scene->getKnownObjectColors(color_map);
     scene_robot_->update(moveit::core::RobotStateConstPtr(rs), color, color_map);
@@ -102,18 +102,22 @@ void PlanningSceneRender::renderPlanningScene(const planning_scene::PlanningScen
   {
     collision_detection::CollisionEnv::ObjectConstPtr object = scene->getWorld()->getObject(id);
     Ogre::ColourValue color = default_env_color;
-    float alpha = default_scene_alpha;
+    double alpha = default_scene_alpha;
     if (scene->hasObjectColor(id))
     {
       const std_msgs::msg::ColorRGBA& c = scene->getObjectColor(id);
       color.r = c.r;
       color.g = c.g;
       color.b = c.b;
+      color.a = c.a;
       alpha = c.a;
     }
     for (std::size_t j = 0; j < object->shapes_.size(); ++j)
-      render_shapes_->renderShape(planning_scene_geometry_node_, object->shapes_[j].get(), object->shape_poses_[j],
-                                  octree_voxel_rendering, octree_color_mode, color, alpha);
+    {
+      render_shapes_->renderShape(planning_scene_geometry_node_, object->shapes_[j].get(),
+                                  object->global_shape_poses_[j], octree_voxel_rendering, octree_color_mode, color,
+                                  alpha);
+    }
   }
 }
 }  // namespace moveit_rviz_plugin

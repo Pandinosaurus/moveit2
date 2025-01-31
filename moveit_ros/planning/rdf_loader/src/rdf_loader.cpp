@@ -35,102 +35,86 @@
 /* Author: Ioan Sucan, Mathias Lüdtke, Dave Coleman */
 
 // MoveIt
-#include <moveit/rdf_loader/rdf_loader.h>
-#include <moveit/profiler/profiler.h>
-
-// ROS 2
-#include <rclcpp/rclcpp.hpp>
+#include <moveit/rdf_loader/rdf_loader.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <ament_index_cpp/get_package_prefix.hpp>
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <moveit/utils/logger.hpp>
 
-// Boost
-#include <boost/filesystem.hpp>
+#include <rclcpp/duration.hpp>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <rclcpp/node.hpp>
+#include <rclcpp/time.hpp>
 
 // C++
 #include <fstream>
 #include <streambuf>
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 
 namespace rdf_loader
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_rdf_loader.rdf_loader");
-
-RDFLoader::RDFLoader(const std::shared_ptr<rclcpp::Node>& node, const std::string& robot_description)
-  : robot_description_(robot_description)
+namespace
 {
-  moveit::tools::Profiler::ScopedStart prof_start;
-  moveit::tools::Profiler::ScopedBlock prof_block("RDFLoader(robot_description)");
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.ros.rdf_loader");
+}
+}  // namespace
 
+RDFLoader::RDFLoader(const std::shared_ptr<rclcpp::Node>& node, const std::string& ros_name,
+                     bool default_continuous_value, double default_timeout)
+  : ros_name_(ros_name)
+{
   auto start = node->now();
 
-  // Check if the robot_description parameter is declared, declare it if it's not declared yet
-  if (!node->has_parameter(robot_description))
-    node->declare_parameter(robot_description);
-  std::string robot_description_content;
-  node->get_parameter_or(robot_description, robot_description_content, std::string());
+  urdf_string_ = urdf_ssp_.loadInitialValue(
+      node, ros_name, [this](const std::string& new_urdf_string) { return urdfUpdateCallback(new_urdf_string); },
+      default_continuous_value, default_timeout);
 
-  if (robot_description_content.empty())
+  const std::string srdf_name = ros_name + "_semantic";
+  srdf_string_ = srdf_ssp_.loadInitialValue(
+      node, srdf_name, [this](const std::string& new_srdf_string) { return srdfUpdateCallback(new_srdf_string); },
+      default_continuous_value, default_timeout);
+
+  if (!loadFromStrings())
   {
-    RCLCPP_INFO_ONCE(LOGGER, "Robot model parameter not found! Did you remap '%s'?\n", robot_description.c_str());
     return;
   }
 
-  std::unique_ptr<urdf::Model> urdf(new urdf::Model());
-  if (!urdf->initString(robot_description_content))
-  {
-    RCLCPP_INFO(LOGGER, "Unable to parse URDF from parameter: '%s'", robot_description.c_str());
-    return;
-  }
-  urdf_ = std::move(urdf);
-
-  const std::string srdf_description = robot_description + "_semantic";
-  // Check if the robot_description_semantic parameter is declared, declare it if it's not declared yet
-  if (!node->has_parameter(srdf_description))
-    node->declare_parameter(srdf_description);
-  std::string srdf_description_content;
-  node->get_parameter_or(srdf_description, srdf_description_content, std::string());
-
-  if (srdf_description_content.empty())
-  {
-    RCLCPP_INFO_ONCE(LOGGER, "Robot semantic description not found. Did you forget to define or remap '%s'?\n",
-                     srdf_description.c_str());
-    return;
-  }
-
-  srdf::ModelSharedPtr srdf(new srdf::Model());
-  if (!srdf->initString(*urdf_, srdf_description_content))
-  {
-    RCLCPP_ERROR(LOGGER, "Unable to parse SRDF from parameter '%s'", srdf_description.c_str());
-    return;
-  }
-  srdf_ = std::move(srdf);
-
-  RCLCPP_INFO_STREAM(LOGGER, "Loaded robot model in " << (node->now() - start).seconds() << " seconds");
+  RCLCPP_INFO_STREAM(getLogger(), "Loaded robot model in " << (node->now() - start).seconds() << " seconds");
 }
 
 RDFLoader::RDFLoader(const std::string& urdf_string, const std::string& srdf_string)
+  : urdf_string_(urdf_string), srdf_string_(srdf_string)
 {
-  moveit::tools::Profiler::ScopedStart prof_start;
-  moveit::tools::Profiler::ScopedBlock prof_block("RDFLoader(string)");
+  if (!loadFromStrings())
+  {
+    return;
+  }
+}
 
-  urdf::Model* umodel = new urdf::Model();
-  urdf_.reset(umodel);
-  if (umodel->initString(urdf_string))
+bool RDFLoader::loadFromStrings()
+{
+  std::unique_ptr<urdf::Model> urdf = std::make_unique<urdf::Model>();
+  if (!urdf->initString(urdf_string_))
   {
-    srdf_.reset(new srdf::Model());
-    if (!srdf_->initString(*urdf_, srdf_string))
-    {
-      RCLCPP_ERROR(LOGGER, "Unable to parse SRDF");
-      srdf_.reset();
-    }
+    RCLCPP_INFO(getLogger(), "Unable to parse URDF");
+    return false;
   }
-  else
+
+  srdf::ModelSharedPtr srdf = std::make_shared<srdf::Model>();
+  if (!srdf->initString(*urdf, srdf_string_))
   {
-    RCLCPP_ERROR(LOGGER, "Unable to parse URDF");
-    urdf_.reset();
+    RCLCPP_ERROR(getLogger(), "Unable to parse SRDF");
+    return false;
   }
+
+  urdf_ = std::move(urdf);
+  srdf_ = std::move(srdf);
+  return true;
 }
 
 bool RDFLoader::isXacroFile(const std::string& path)
@@ -145,20 +129,20 @@ bool RDFLoader::loadFileToString(std::string& buffer, const std::string& path)
 {
   if (path.empty())
   {
-    RCLCPP_ERROR(LOGGER, "Path is empty");
+    RCLCPP_ERROR(getLogger(), "Path is empty");
     return false;
   }
 
-  if (!boost::filesystem::exists(path))
+  if (!std::filesystem::exists(path))
   {
-    RCLCPP_ERROR(LOGGER, "File does not exist");
+    RCLCPP_ERROR(getLogger(), "File does not exist");
     return false;
   }
 
   std::ifstream stream(path.c_str());
   if (!stream.good())
   {
-    RCLCPP_ERROR(LOGGER, "Unable to load path");
+    RCLCPP_ERROR(getLogger(), "Unable to load path");
     return false;
   }
 
@@ -175,27 +159,32 @@ bool RDFLoader::loadFileToString(std::string& buffer, const std::string& path)
 bool RDFLoader::loadXacroFileToString(std::string& buffer, const std::string& path,
                                       const std::vector<std::string>& xacro_args)
 {
+  buffer.clear();
   if (path.empty())
   {
-    RCLCPP_ERROR(LOGGER, "Path is empty");
+    RCLCPP_ERROR(getLogger(), "Path is empty");
     return false;
   }
 
-  if (!boost::filesystem::exists(path))
+  if (!std::filesystem::exists(path))
   {
-    RCLCPP_ERROR(LOGGER, "File does not exist");
+    RCLCPP_ERROR(getLogger(), "File does not exist");
     return false;
   }
 
-  std::string cmd = "ros2 run xacro xacro";
+  std::string cmd = "ros2 run xacro xacro ";
   for (const std::string& xacro_arg : xacro_args)
     cmd += xacro_arg + " ";
   cmd += path;
 
+#ifdef _WIN32
+  FILE* pipe = _popen(cmd.c_str(), "r");
+#else
   FILE* pipe = popen(cmd.c_str(), "r");
+#endif
   if (!pipe)
   {
-    RCLCPP_ERROR(LOGGER, "Unable to load path");
+    RCLCPP_ERROR(getLogger(), "Unable to load path");
     return false;
   }
 
@@ -205,7 +194,11 @@ bool RDFLoader::loadXacroFileToString(std::string& buffer, const std::string& pa
     if (fgets(pipe_buffer, 128, pipe) != nullptr)
       buffer += pipe_buffer;
   }
+#ifdef _WIN32
+  _pclose(pipe);
+#else
   pclose(pipe);
+#endif
 
   return true;
 }
@@ -231,14 +224,39 @@ bool RDFLoader::loadPkgFileToString(std::string& buffer, const std::string& pack
   }
   catch (const ament_index_cpp::PackageNotFoundError& e)
   {
-    RCLCPP_ERROR(LOGGER, "ament_index_cpp: %s", e.what());
+    RCLCPP_ERROR(getLogger(), "ament_index_cpp: %s", e.what());
     return false;
   }
 
-  boost::filesystem::path path(package_path);
-  // Use boost to cross-platform combine paths
+  std::filesystem::path path(package_path);
   path = path / relative_path;
 
   return loadXmlFileToString(buffer, path.string(), xacro_args);
+}
+
+void RDFLoader::urdfUpdateCallback(const std::string& new_urdf_string)
+{
+  urdf_string_ = new_urdf_string;
+  if (!loadFromStrings())
+  {
+    return;
+  }
+  if (new_model_cb_)
+  {
+    new_model_cb_();
+  }
+}
+
+void RDFLoader::srdfUpdateCallback(const std::string& new_srdf_string)
+{
+  srdf_string_ = new_srdf_string;
+  if (!loadFromStrings())
+  {
+    return;
+  }
+  if (new_model_cb_)
+  {
+    new_model_cb_();
+  }
 }
 }  // namespace rdf_loader

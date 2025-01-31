@@ -34,11 +34,15 @@
 
 /* Author: Ioan Sucan, Acorn Pooley, Adam Leeper */
 
-#include <moveit/robot_interaction/interactive_marker_helpers.h>
+#include <math.h>
+#include <moveit/robot_interaction/interactive_marker_helpers.hpp>
+// TODO: Remove conditional include when released to all active distros.
+#if __has_include(<tf2/LinearMath/Quaternion.hpp>)
+#include <tf2/LinearMath/Quaternion.hpp>
+#else
 #include <tf2/LinearMath/Quaternion.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
-
-#include <boost/math/constants/constants.hpp>
+#endif
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 namespace robot_interaction
 {
@@ -69,7 +73,7 @@ void addTArrowMarker(visualization_msgs::msg::InteractiveMarker& im)
   // Arrow points along Z
   tf2::Quaternion imq, tmq;
   tf2::fromMsg(m.pose.orientation, imq);
-  tmq.setRPY(0, -boost::math::constants::pi<double>() / 2.0, 0);
+  tmq.setRPY(0, -M_PI / 2.0, 0);
   imq = imq * tmq;
   m.pose.orientation = tf2::toMsg(imq);
   m.color.r = 0.0f;
@@ -89,7 +93,7 @@ void addTArrowMarker(visualization_msgs::msg::InteractiveMarker& im)
   mc.pose = im.pose;
   // Cylinder points along Y
   tf2::fromMsg(mc.pose.orientation, imq);
-  tmq.setRPY(boost::math::constants::pi<double>() / 2.0, 0, 0);
+  tmq.setRPY(M_PI / 2.0, 0, 0);
   imq = imq * tmq;
   mc.pose.orientation = tf2::toMsg(imq);
   mc.pose.position.x -= 0.04;
@@ -237,11 +241,17 @@ void addViewPlaneControl(visualization_msgs::msg::InteractiveMarker& int_marker,
   visualization_msgs::msg::InteractiveMarkerControl control;
   control.orientation_mode = visualization_msgs::msg::InteractiveMarkerControl::VIEW_FACING;
   if (position && orientation)
+  {
     control.interaction_mode = visualization_msgs::msg::InteractiveMarkerControl::MOVE_ROTATE_3D;
+  }
   else if (orientation)
+  {
     control.interaction_mode = visualization_msgs::msg::InteractiveMarkerControl::ROTATE_3D;
+  }
   else
+  {
     control.interaction_mode = visualization_msgs::msg::InteractiveMarkerControl::MOVE_3D;
+  }
   control.independent_marker_orientation = true;
   control.name = "move";
 

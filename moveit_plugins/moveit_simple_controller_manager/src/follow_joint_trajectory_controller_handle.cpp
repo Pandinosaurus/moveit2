@@ -35,7 +35,7 @@
 
 /* Author: Michael Ferguson, Ioan Sucan, E. Gil Jones */
 
-#include <moveit_simple_controller_manager/follow_joint_trajectory_controller_handle.h>
+#include <moveit_simple_controller_manager/follow_joint_trajectory_controller_handle.hpp>
 
 using namespace std::placeholders;
 
@@ -43,34 +43,45 @@ namespace moveit_simple_controller_manager
 {
 bool FollowJointTrajectoryControllerHandle::sendTrajectory(const moveit_msgs::msg::RobotTrajectory& trajectory)
 {
-  RCLCPP_DEBUG_STREAM(LOGGER, "new trajectory to " << name_);
+  RCLCPP_DEBUG_STREAM(logger_, "new trajectory to " << name_);
 
   if (!controller_action_client_)
     return false;
 
-  if (!trajectory.multi_dof_joint_trajectory.points.empty())
+  if (!isConnected())
   {
-    RCLCPP_WARN_STREAM(LOGGER, name_ << " cannot execute multi-dof trajectories.");
+    RCLCPP_ERROR_STREAM(logger_, "Action client not connected to action server: " << getActionName());
+    return false;
   }
 
   if (done_)
-    RCLCPP_INFO_STREAM(LOGGER, "sending trajectory to " << name_);
+  {
+    RCLCPP_INFO_STREAM(logger_, "sending trajectory to " << name_);
+  }
   else
-    RCLCPP_INFO_STREAM(LOGGER, "sending continuation for the currently executed trajectory to " << name_);
+  {
+    RCLCPP_INFO_STREAM(logger_, "sending continuation for the currently executed trajectory to " << name_);
+  }
 
   control_msgs::action::FollowJointTrajectory::Goal goal = goal_template_;
   goal.trajectory = trajectory.joint_trajectory;
+  goal.multi_dof_trajectory = trajectory.multi_dof_joint_trajectory;
 
   rclcpp_action::Client<control_msgs::action::FollowJointTrajectory>::SendGoalOptions send_goal_options;
   // Active callback
-  send_goal_options.goal_response_callback = [this](const auto& future) {
-    RCLCPP_INFO_STREAM(LOGGER, name_ << " started execution");
-    const auto& goal_handle = future.get();
-    if (!goal_handle)
-      RCLCPP_WARN(LOGGER, "Goal request rejected");
-    else
-      RCLCPP_INFO(LOGGER, "Goal request accepted!");
-  };
+  send_goal_options.goal_response_callback =
+      [this](
+          const rclcpp_action::Client<control_msgs::action::FollowJointTrajectory>::GoalHandle::SharedPtr& goal_handle) {
+        RCLCPP_INFO_STREAM(logger_, name_ << " started execution");
+        if (!goal_handle)
+        {
+          RCLCPP_WARN(logger_, "Goal request rejected");
+        }
+        else
+        {
+          RCLCPP_INFO(logger_, "Goal request accepted!");
+        }
+      };
 
   done_ = false;
   last_exec_ = moveit_controller_manager::ExecutionStatus::RUNNING;
@@ -80,7 +91,7 @@ bool FollowJointTrajectoryControllerHandle::sendTrajectory(const moveit_msgs::ms
   current_goal_ = current_goal_future.get();
   if (!current_goal_)
   {
-    RCLCPP_ERROR(LOGGER, "Goal was rejected by server");
+    RCLCPP_ERROR(logger_, "Goal was rejected by server");
     return false;
   }
   return true;
@@ -124,13 +135,13 @@ inline double& variable<ACCELERATION>(control_msgs::msg::JointTolerance& msg)
   return msg.acceleration;
 }
 
-static std::map<ToleranceVariables, std::string> VAR_NAME = { { POSITION, "position" },
-                                                              { VELOCITY, "velocity" },
-                                                              { ACCELERATION, "acceleration" } };
-static std::map<ToleranceVariables, decltype(&variable<POSITION>)> VAR_ACCESS = { { POSITION, &variable<POSITION> },
-                                                                                  { VELOCITY, &variable<VELOCITY> },
-                                                                                  { ACCELERATION,
-                                                                                    &variable<ACCELERATION> } };
+const std::map<ToleranceVariables, std::string> VAR_NAME = { { POSITION, "position" },
+                                                             { VELOCITY, "velocity" },
+                                                             { ACCELERATION, "acceleration" } };
+const std::map<ToleranceVariables, decltype(&variable<POSITION>)> VAR_ACCESS = { { POSITION, &variable<POSITION> },
+                                                                                 { VELOCITY, &variable<VELOCITY> },
+                                                                                 { ACCELERATION,
+                                                                                   &variable<ACCELERATION> } };
 
 const char* errorCodeToMessage(int error_code)
 {
@@ -217,13 +228,19 @@ void FollowJointTrajectoryControllerHandle::controllerDoneCallback(
 {
   // Output custom error message for FollowJointTrajectoryResult if necessary
   if (!wrapped_result.result)
-    RCLCPP_WARN_STREAM(LOGGER, "Controller " << name_ << " done, no result returned");
+  {
+    RCLCPP_WARN_STREAM(logger_, "Controller '" << name_ << "' done, no result returned");
+  }
   else if (wrapped_result.result->error_code == control_msgs::action::FollowJointTrajectory::Result::SUCCESSFUL)
-    RCLCPP_INFO_STREAM(LOGGER, "Controller " << name_ << " successfully finished");
+  {
+    RCLCPP_INFO_STREAM(logger_, "Controller '" << name_ << "' successfully finished");
+  }
   else
-    RCLCPP_WARN_STREAM(LOGGER, "Controller " << name_ << " failed with error "
-                                             << errorCodeToMessage(wrapped_result.result->error_code) << ": "
-                                             << wrapped_result.result->error_string);
+  {
+    RCLCPP_WARN_STREAM(logger_, "Controller '" << name_ << "' failed with error "
+                                               << errorCodeToMessage(wrapped_result.result->error_code) << ": "
+                                               << wrapped_result.result->error_string);
+  }
   finishControllerExecution(wrapped_result.code);
 }
 

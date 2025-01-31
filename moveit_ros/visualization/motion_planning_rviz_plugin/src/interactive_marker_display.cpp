@@ -33,13 +33,13 @@
 #include <utility>
 #include <vector>
 
-#include "rviz_common/properties/bool_property.hpp"
-#include "rviz_common/validate_floats.hpp"
-#include "rviz_common/display_context.hpp"
+#include <rviz_common/properties/bool_property.hpp>
+#include <rviz_common/validate_floats.hpp>
+#include <rviz_common/display_context.hpp>
 
-#include "rviz_default_plugins/displays/interactive_markers/interactive_marker_namespace_property.hpp"
+#include <rviz_default_plugins/displays/interactive_markers/interactive_marker_namespace_property.hpp>
 
-#include "moveit/motion_planning_rviz_plugin/interactive_marker_display.h"
+#include <moveit/motion_planning_rviz_plugin/interactive_marker_display.hpp>
 
 namespace rviz_default_plugins
 {
@@ -109,16 +109,22 @@ void InteractiveMarkerDisplay::onInitialize()
   private_executor_thread_ = std::thread([this]() { private_executor_->spin(); });
   auto frame_transformer = context_->getFrameManager()->getTransformer();
   //  rclcpp::Node::SharedPtr node = ros_node_abstraction->get_raw_node();
-  interactive_marker_client_.reset(
-      new interactive_markers::InteractiveMarkerClient(pnode_, frame_transformer, fixed_frame_.toStdString()));
+  interactive_marker_client_ = std::make_unique<interactive_markers::InteractiveMarkerClient>(
+      pnode_, frame_transformer, fixed_frame_.toStdString());
 
   interactive_marker_client_->setInitializeCallback(
-      std::bind(&InteractiveMarkerDisplay::initializeCallback, this, std::placeholders::_1));
+      [this](const visualization_msgs::srv::GetInteractiveMarkers::Response::SharedPtr& msg) {
+        return initializeCallback(msg);
+      });
   interactive_marker_client_->setUpdateCallback(
-      std::bind(&InteractiveMarkerDisplay::updateCallback, this, std::placeholders::_1));
-  interactive_marker_client_->setResetCallback(std::bind(&InteractiveMarkerDisplay::resetCallback, this));
+      [this](const visualization_msgs::msg::InteractiveMarkerUpdate::ConstSharedPtr& msg) {
+        return updateCallback(msg);
+      });
+  interactive_marker_client_->setResetCallback([this]() { return resetCallback(); });
   interactive_marker_client_->setStatusCallback(
-      std::bind(&InteractiveMarkerDisplay::statusCallback, this, std::placeholders::_1, std::placeholders::_2));
+      [this](interactive_markers::InteractiveMarkerClient::Status status, const std::string& message) {
+        return statusCallback(status, message);
+      });
 
   subscribe();
 }
@@ -274,13 +280,14 @@ void InteractiveMarkerDisplay::updatePoses(
   }
 }
 
-void InteractiveMarkerDisplay::initializeCallback(visualization_msgs::srv::GetInteractiveMarkers::Response::SharedPtr msg)
+void InteractiveMarkerDisplay::initializeCallback(
+    const visualization_msgs::srv::GetInteractiveMarkers::Response::SharedPtr& msg)
 {
   eraseAllMarkers();
   updateMarkers(msg->markers);
 }
 
-void InteractiveMarkerDisplay::updateCallback(visualization_msgs::msg::InteractiveMarkerUpdate::ConstSharedPtr msg)
+void InteractiveMarkerDisplay::updateCallback(const visualization_msgs::msg::InteractiveMarkerUpdate::ConstSharedPtr& msg)
 {
   updateMarkers(msg->markers);
   updatePoses(msg->poses);

@@ -1,42 +1,41 @@
-cmake_minimum_required(VERSION 3.1.3)
-project(chomp_motion_planner)
+cmake_minimum_required(VERSION 3.22)
+project(chomp_motion_planner LANGUAGES CXX)
 
-if(NOT "${CMAKE_CXX_STANDARD}")
-  set(CMAKE_CXX_STANDARD 14)
-endif()
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+# Common cmake code applied to all moveit packages
+find_package(moveit_common REQUIRED)
+moveit_package()
 
-find_package(catkin REQUIRED COMPONENTS
-  roscpp
-  moveit_core
-)
+# find dependencies
+find_package(ament_cmake REQUIRED)
+find_package(moveit_core REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rsl REQUIRED)
+find_package(trajectory_msgs REQUIRED)
 
-catkin_package(
-  INCLUDE_DIRS include
-  LIBRARIES ${PROJECT_NAME}
-)
+set(THIS_PACKAGE_INCLUDE_DEPENDS moveit_core rclcpp rsl trajectory_msgs
+                                 visualization_msgs)
 
 include_directories(include)
-include_directories(SYSTEM ${catkin_INCLUDE_DIRS})
 
-add_library(${PROJECT_NAME}
-  src/chomp_cost.cpp
-  src/chomp_parameters.cpp
-  src/chomp_trajectory.cpp
-  src/chomp_optimizer.cpp
-  src/chomp_planner.cpp
-)
-set_target_properties(${PROJECT_NAME} PROPERTIES VERSION "${${PROJECT_NAME}_VERSION}")
+add_library(
+  chomp_motion_planner SHARED
+  src/chomp_cost.cpp src/chomp_parameters.cpp src/chomp_trajectory.cpp
+  src/chomp_optimizer.cpp src/chomp_planner.cpp)
+set_target_properties(chomp_motion_planner
+                      PROPERTIES VERSION "${chomp_motion_planner_VERSION}")
+ament_target_dependencies(chomp_motion_planner ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
-target_link_libraries(${PROJECT_NAME} ${catkin_LIBRARIES})
+install(
+  TARGETS chomp_motion_planner
+  EXPORT chomp_motion_plannerTargets
+  LIBRARY DESTINATION lib
+  ARCHIVE DESTINATION lib
+  RUNTIME DESTINATION bin
+  INCLUDES
+  DESTINATION include/chomp_motion_planner)
+install(DIRECTORY include/ DESTINATION include/chomp_motion_planner)
 
-install(DIRECTORY include/${PROJECT_NAME}/
-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
-)
+ament_export_targets(chomp_motion_plannerTargets HAS_LIBRARY_TARGET)
+ament_export_dependencies(${THIS_PACKAGE_EXPORT_DEPENDS})
 
-install(TARGETS ${PROJECT_NAME}
-  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION}
-)
+ament_package()

@@ -34,41 +34,50 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/planning_interface/planning_interface.h>
-#include <boost/thread/mutex.hpp>
+#include <moveit/planning_interface/planning_interface.hpp>
+#include <mutex>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
 #include <set>
+#include <moveit/utils/logger.hpp>
 
 namespace planning_interface
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_planning_interface.planning_interface");
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.core.planning_interface");
+}
+}  // namespace
 
 namespace
 {
 // keep track of currently active contexts
 struct ActiveContexts
 {
-  boost::mutex mutex_;
+  std::mutex mutex_;
   std::set<PlanningContext*> contexts_;
 };
 
-static ActiveContexts& getActiveContexts()
+ActiveContexts& getActiveContexts()
 {
-  static ActiveContexts ac;
-  return ac;
+  static ActiveContexts s_ac;
+  return s_ac;
 }
 }  // namespace
 
 PlanningContext::PlanningContext(const std::string& name, const std::string& group) : name_(name), group_(group)
 {
   ActiveContexts& ac = getActiveContexts();
-  boost::mutex::scoped_lock _(ac.mutex_);
+  std::scoped_lock _(ac.mutex_);
   ac.contexts_.insert(this);
 }
 
 PlanningContext::~PlanningContext()
 {
   ActiveContexts& ac = getActiveContexts();
-  boost::mutex::scoped_lock _(ac.mutex_);
+  std::scoped_lock _(ac.mutex_);
   ac.contexts_.erase(this);
 }
 
@@ -82,19 +91,20 @@ void PlanningContext::setMotionPlanRequest(const MotionPlanRequest& request)
   request_ = request;
   if (request_.allowed_planning_time <= 0.0)
   {
-    RCLCPP_INFO(LOGGER, "The timeout for planning must be positive (%lf specified). Assuming one second instead.",
+    RCLCPP_INFO(getLogger(), "The timeout for planning must be positive (%lf specified). Assuming one second instead.",
                 request_.allowed_planning_time);
     request_.allowed_planning_time = 1.0;
   }
   if (request_.num_planning_attempts < 0)
-    RCLCPP_ERROR(LOGGER, "The number of desired planning attempts should be positive. "
-                         "Assuming one attempt.");
+  {
+    RCLCPP_ERROR(getLogger(), "The number of desired planning attempts should be positive. "
+                              "Assuming one attempt.");
+  }
   request_.num_planning_attempts = std::max(1, request_.num_planning_attempts);
 }
 
 bool PlannerManager::initialize(const moveit::core::RobotModelConstPtr& /*unused*/,
-                                const rclcpp::Node::SharedPtr& node /* unused */,
-                                const std::string& parameter_namespace /* unused */)
+                                const rclcpp::Node::SharedPtr& /* unused */, const std::string& /* unused */)
 {
   return true;
 }
@@ -125,7 +135,7 @@ void PlannerManager::setPlannerConfigurations(const PlannerConfigurationMap& pcs
 void PlannerManager::terminate() const
 {
   ActiveContexts& ac = getActiveContexts();
-  boost::mutex::scoped_lock _(ac.mutex_);
+  std::scoped_lock _(ac.mutex_);
   for (PlanningContext* context : ac.contexts_)
     context->terminate();
 }

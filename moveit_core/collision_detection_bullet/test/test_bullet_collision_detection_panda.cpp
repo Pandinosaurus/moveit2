@@ -34,11 +34,17 @@
 
 /* Author: Jens Petit */
 
-#include <moveit/collision_detection_bullet/collision_detector_allocator_bullet.h>
-#include <moveit/collision_detection/test_collision_common_panda.h>
+#include <moveit/collision_detection_bullet/collision_detector_allocator_bullet.hpp>
+#include <moveit/collision_detection/test_collision_common_panda.hpp>
 
-INSTANTIATE_TYPED_TEST_CASE_P(BulletCollisionCheckPanda, CollisionDetectorPandaTest,
-                              collision_detection::CollisionDetectorAllocatorBullet);
+INSTANTIATE_TYPED_TEST_SUITE_P(BulletCollisionCheckPanda, CollisionDetectorPandaTest,
+                               collision_detection::CollisionDetectorAllocatorBullet);
+
+// These are not instantiated, because be don't yet have distance checking for Bullet
+#ifdef GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(DistanceCheckPandaTest);
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(DistanceFullPandaTest);
+#endif
 
 int main(int argc, char* argv[])
 {

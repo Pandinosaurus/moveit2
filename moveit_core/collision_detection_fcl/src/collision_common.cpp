@@ -34,9 +34,12 @@
 
 /* Author: Ioan Sucan, Jia Pan */
 
-#include <moveit/collision_detection_fcl/collision_common.h>
+#include <moveit/collision_detection_fcl/collision_common.hpp>
 #include <geometric_shapes/shapes.h>
-#include <moveit/collision_detection_fcl/fcl_compat.h>
+#include <moveit/collision_detection_fcl/fcl_compat.hpp>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <moveit/utils/logger.hpp>
 
 #if (MOVEIT_FCL_VERSION >= FCL_VERSION_CHECK(0, 6, 0))
 #include <fcl/geometry/bvh/BVH_model.h>
@@ -47,13 +50,19 @@
 #include <fcl/octree.h>
 #endif
 
-#include <boost/thread/mutex.hpp>
 #include <memory>
+#include <type_traits>
+#include <mutex>
 
 namespace collision_detection
 {
-// Logger
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_collision_detection_fcl.collision_common");
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.core.moveit_collision_detection_fcl");
+}
+}  // namespace
 
 bool collisionCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, void* data)
 {
@@ -99,18 +108,22 @@ bool collisionCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, voi
       {
         always_allow_collision = true;
         if (cdata->req_->verbose)
-          RCLCPP_DEBUG(LOGGER,
+        {
+          RCLCPP_DEBUG(getLogger(),
                        "Collision between '%s' (type '%s') and '%s' (type '%s') is always allowed. "
                        "No contacts are computed.",
                        cd1->getID().c_str(), cd1->getTypeString().c_str(), cd2->getID().c_str(),
                        cd2->getTypeString().c_str());
+        }
       }
       else if (type == AllowedCollision::CONDITIONAL)
       {
         cdata->acm_->getAllowedCollision(cd1->getID(), cd2->getID(), dcf);
         if (cdata->req_->verbose)
-          RCLCPP_DEBUG(LOGGER, "Collision between '%s' and '%s' is conditionally allowed", cd1->getID().c_str(),
+        {
+          RCLCPP_DEBUG(getLogger(), "Collision between '%s' and '%s' is conditionally allowed", cd1->getID().c_str(),
                        cd2->getID().c_str());
+        }
       }
     }
   }
@@ -123,8 +136,10 @@ bool collisionCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, voi
     {
       always_allow_collision = true;
       if (cdata->req_->verbose)
-        RCLCPP_DEBUG(LOGGER, "Robot link '%s' is allowed to touch attached object '%s'. No contacts are computed.",
+      {
+        RCLCPP_DEBUG(getLogger(), "Robot link '%s' is allowed to touch attached object '%s'. No contacts are computed.",
                      cd1->getID().c_str(), cd2->getID().c_str());
+      }
     }
   }
   else if (cd2->type == BodyTypes::ROBOT_LINK && cd1->type == BodyTypes::ROBOT_ATTACHED)
@@ -134,15 +149,36 @@ bool collisionCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, voi
     {
       always_allow_collision = true;
       if (cdata->req_->verbose)
-        RCLCPP_DEBUG(LOGGER, "Robot link '%s' is allowed to touch attached object '%s'. No contacts are computed.",
+      {
+        RCLCPP_DEBUG(getLogger(), "Robot link '%s' is allowed to touch attached object '%s'. No contacts are computed.",
                      cd2->getID().c_str(), cd1->getID().c_str());
+      }
     }
   }
+
   // bodies attached to the same link should not collide
+  // If one of the attached objects lists the other in touch links set, then collisions are also allowed
   if (cd1->type == BodyTypes::ROBOT_ATTACHED && cd2->type == BodyTypes::ROBOT_ATTACHED)
   {
     if (cd1->ptr.ab->getAttachedLink() == cd2->ptr.ab->getAttachedLink())
+    {
       always_allow_collision = true;
+    }
+    else
+    {
+      const std::set<std::string>& tl1 = cd1->ptr.ab->getTouchLinks();
+      const std::set<std::string>& tl2 = cd2->ptr.ab->getTouchLinks();
+      if (tl1.find(cd2->getID()) != tl1.end() || tl2.find(cd1->getID()) != tl2.end())
+      {
+        always_allow_collision = true;
+      }
+    }
+    if (always_allow_collision && cdata->req_->verbose)
+    {
+      RCLCPP_DEBUG(getLogger(),
+                   "Attached object '%s' is allowed to touch attached object '%s'. No contacts are computed.",
+                   cd2->getID().c_str(), cd1->getID().c_str());
+    }
   }
 
   // if collisions are always allowed, we are done
@@ -150,11 +186,15 @@ bool collisionCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, voi
     return false;
 
   if (cdata->req_->verbose)
-    RCLCPP_DEBUG(LOGGER, "Actually checking collisions between %s and %s", cd1->getID().c_str(), cd2->getID().c_str());
+  {
+    RCLCPP_DEBUG(getLogger(), "Actually checking collisions between %s and %s", cd1->getID().c_str(),
+                 cd2->getID().c_str());
+  }
 
   // see if we need to compute a contact
-  std::size_t want_contact_count = 0;
+  std::size_t want_contact_count{ 0 };
   if (cdata->req_->contacts)
+  {
     if (cdata->res_->contact_count < cdata->req_->max_contacts)
     {
       std::size_t have;
@@ -169,9 +209,12 @@ bool collisionCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, voi
         have = cdata->res_->contacts.find(cp) != cdata->res_->contacts.end() ? cdata->res_->contacts[cp].size() : 0;
       }
       if (have < cdata->req_->max_contacts_per_pair)
+      {
         want_contact_count =
             std::min(cdata->req_->max_contacts_per_pair - have, cdata->req_->max_contacts - cdata->res_->contact_count);
+      }
     }
+  }
 
   if (dcf)
   {
@@ -187,10 +230,12 @@ bool collisionCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, voi
     if (num_contacts > 0)
     {
       if (cdata->req_->verbose)
-        RCLCPP_INFO(LOGGER,
+      {
+        RCLCPP_INFO(getLogger(),
                     "Found %d contacts between '%s' and '%s'. "
                     "These contacts will be evaluated to check if they are accepted or not",
                     num_contacts, cd1->getID().c_str(), cd2->getID().c_str());
+      }
       Contact c;
       const std::pair<std::string, std::string>& pc = cd1->getID() < cd2->getID() ?
                                                           std::make_pair(cd1->getID(), cd2->getID()) :
@@ -208,15 +253,19 @@ bool collisionCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, voi
             cdata->res_->contacts[pc].push_back(c);
             cdata->res_->contact_count++;
             if (cdata->req_->verbose)
-              RCLCPP_INFO(LOGGER, "Found unacceptable contact between '%s' and '%s'. Contact was stored.",
+            {
+              RCLCPP_INFO(getLogger(), "Found unacceptable contact between '%s' and '%s'. Contact was stored.",
                           cd1->getID().c_str(), cd2->getID().c_str());
+            }
           }
           else if (cdata->req_->verbose)
-            RCLCPP_INFO(LOGGER,
+          {
+            RCLCPP_INFO(getLogger(),
                         "Found unacceptable contact between '%s' (type '%s') and '%s' "
                         "(type '%s'). Contact was stored.",
                         cd1->getID().c_str(), cd1->getTypeString().c_str(), cd2->getID().c_str(),
                         cd2->getTypeString().c_str());
+          }
           cdata->res_->collision = true;
           if (want_contact_count == 0)
             break;
@@ -246,7 +295,7 @@ bool collisionCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, voi
       // otherwise, we need to compute more things
       bool enable_cost = cdata->req_->cost;
       std::size_t num_max_cost_sources = cdata->req_->max_cost_sources;
-      bool enable_contact = true;
+      bool enable_contact{ true };
 
       fcl::CollisionResultd col_result;
       int num_contacts =
@@ -258,8 +307,10 @@ bool collisionCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, voi
         int num_contacts_initial = num_contacts;
 
         // make sure we don't get more contacts than we want
-        if (want_contact_count >= (std::size_t)num_contacts)
+        if (want_contact_count >= static_cast<std::size_t>(num_contacts))
+        {
           want_contact_count -= num_contacts;
+        }
         else
         {
           num_contacts = want_contact_count;
@@ -267,11 +318,13 @@ bool collisionCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, voi
         }
 
         if (cdata->req_->verbose)
-          RCLCPP_INFO(LOGGER,
+        {
+          RCLCPP_INFO(getLogger(),
                       "Found %d contacts between '%s' (type '%s') and '%s' (type '%s'), "
                       "which constitute a collision. %d contacts will be stored",
                       num_contacts_initial, cd1->getID().c_str(), cd1->getTypeString().c_str(), cd2->getID().c_str(),
                       cd2->getTypeString().c_str(), num_contacts);
+        }
 
         const std::pair<std::string, std::string>& pc = cd1->getID() < cd2->getID() ?
                                                             std::make_pair(cd1->getID(), cd2->getID()) :
@@ -313,12 +366,14 @@ bool collisionCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, voi
       {
         cdata->res_->collision = true;
         if (cdata->req_->verbose)
-          RCLCPP_INFO(LOGGER,
+        {
+          RCLCPP_INFO(getLogger(),
                       "Found a contact between '%s' (type '%s') and '%s' (type '%s'), "
                       "which constitutes a collision. "
                       "Contact information is not stored.",
                       cd1->getID().c_str(), cd1->getTypeString().c_str(), cd2->getID().c_str(),
                       cd2->getTypeString().c_str());
+        }
       }
 
       if (enable_cost)
@@ -339,24 +394,31 @@ bool collisionCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, voi
   }
 
   if (cdata->res_->collision)
+  {
     if (!cdata->req_->contacts || cdata->res_->contact_count >= cdata->req_->max_contacts)
     {
       if (!cdata->req_->cost)
         cdata->done_ = true;
       if (cdata->req_->verbose)
-        RCLCPP_INFO(LOGGER,
+      {
+        RCLCPP_INFO(getLogger(),
                     "Collision checking is considered complete (collision was found and %u contacts are stored)",
-                    (unsigned int)cdata->res_->contact_count);
+                    static_cast<unsigned int>(cdata->res_->contact_count));
+      }
     }
+  }
 
   if (!cdata->done_ && cdata->req_->is_done)
   {
     cdata->done_ = cdata->req_->is_done(*cdata->res_);
     if (cdata->done_ && cdata->req_->verbose)
-      RCLCPP_INFO(LOGGER,
+    {
+      RCLCPP_INFO(getLogger(),
                   "Collision checking is considered complete due to external callback. "
                   "%s was found. %u contacts are stored.",
-                  cdata->res_->collision ? "Collision" : "No collision", (unsigned int)cdata->res_->contact_count);
+                  cdata->res_->collision ? "Collision" : "No collision",
+                  static_cast<unsigned int>(cdata->res_->contact_count));
+    }
   }
 
   return cdata->done_;
@@ -390,10 +452,10 @@ struct FCLShapeCache
           map_.erase(it);
         it = nit;
       }
-      //      RCLCPP_DEBUG(LOGGER, "Cleaning up cache for FCL objects that correspond to static
+      //      RCLCPP_DEBUG(getLogger(), "Cleaning up cache for FCL objects that correspond to static
       //      shapes. Cache size
       //      reduced from %u
-      //      to %u", from, (unsigned int)map_.size());
+      //      to %u", from, static_cast<unsigned int>(map_.size()));
     }
   }
 
@@ -406,7 +468,7 @@ struct FCLShapeCache
   unsigned int clean_count_;
 };
 
-bool distanceCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, void* data, double& min_dist)
+bool distanceCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, void* data, double& /*min_dist*/)
 {
   DistanceData* cdata = reinterpret_cast<DistanceData*>(data);
 
@@ -442,7 +504,6 @@ bool distanceCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, void
   if (cdata->req->acm)
   {
     AllowedCollision::Type type;
-
     bool found = cdata->req->acm->getAllowedCollision(cd1->getID(), cd2->getID(), type);
     if (found)
     {
@@ -451,8 +512,10 @@ bool distanceCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, void
       {
         always_allow_collision = true;
         if (cdata->req->verbose)
-          RCLCPP_DEBUG(LOGGER, "Collision between '%s' and '%s' is always allowed. No distances are computed.",
+        {
+          RCLCPP_DEBUG(getLogger(), "Collision between '%s' and '%s' is always allowed. No distances are computed.",
                        cd1->getID().c_str(), cd2->getID().c_str());
+        }
       }
     }
   }
@@ -465,8 +528,11 @@ bool distanceCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, void
     {
       always_allow_collision = true;
       if (cdata->req->verbose)
-        RCLCPP_DEBUG(LOGGER, "Robot link '%s' is allowed to touch attached object '%s'. No distances are computed.",
+      {
+        RCLCPP_DEBUG(getLogger(),
+                     "Robot link '%s' is allowed to touch attached object '%s'. No distances are computed.",
                      cd1->getID().c_str(), cd2->getID().c_str());
+      }
     }
   }
   else if (cd2->type == BodyTypes::ROBOT_LINK && cd1->type == BodyTypes::ROBOT_ATTACHED)
@@ -476,8 +542,11 @@ bool distanceCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, void
     {
       always_allow_collision = true;
       if (cdata->req->verbose)
-        RCLCPP_DEBUG(LOGGER, "Robot link '%s' is allowed to touch attached object '%s'. No distances are computed.",
+      {
+        RCLCPP_DEBUG(getLogger(),
+                     "Robot link '%s' is allowed to touch attached object '%s'. No distances are computed.",
                      cd2->getID().c_str(), cd1->getID().c_str());
+      }
     }
   }
 
@@ -486,17 +555,26 @@ bool distanceCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, void
     return false;
   }
   if (cdata->req->verbose)
-    RCLCPP_DEBUG(LOGGER, "Actually checking collisions between %s and %s", cd1->getID().c_str(), cd2->getID().c_str());
+  {
+    RCLCPP_DEBUG(getLogger(), "Actually checking collisions between %s and %s", cd1->getID().c_str(),
+                 cd2->getID().c_str());
+  }
 
   double dist_threshold = cdata->req->distance_threshold;
 
-  const std::pair<std::string, std::string>& pc = cd1->getID() < cd2->getID() ?
-                                                      std::make_pair(cd1->getID(), cd2->getID()) :
-                                                      std::make_pair(cd2->getID(), cd1->getID());
+  const std::pair<const std::string&, const std::string&> pc =
+      cd1->getID() < cd2->getID() ? std::make_pair(std::cref(cd1->getID()), std::cref(cd2->getID())) :
+                                    std::make_pair(std::cref(cd2->getID()), std::cref(cd1->getID()));
 
   DistanceMap::iterator it = cdata->res->distances.find(pc);
 
-  if (it != cdata->res->distances.end())
+  // GLOBAL search: for efficiency, distance_threshold starts at the smallest distance between any pairs found so far
+  if (cdata->req->type == DistanceRequestType::GLOBAL)
+  {
+    dist_threshold = cdata->res->minimum_distance.distance;
+  }
+  // Check if a distance between this pair has been found yet. Decrease threshold_distance if so, to narrow the search
+  else if (it != cdata->res->distances.end())
   {
     if (cdata->req->type == DistanceRequestType::LIMITED)
     {
@@ -505,10 +583,6 @@ bool distanceCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, void
       {
         return cdata->done;
       }
-    }
-    else if (cdata->req->type == DistanceRequestType::GLOBAL)
-    {
-      dist_threshold = cdata->res->minimum_distance.distance;
     }
     else if (cdata->req->type == DistanceRequestType::SINGLE)
     {
@@ -526,39 +600,48 @@ bool distanceCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, void
   {
     return false;
   }
-  double d = fcl::distance(o1, o2, fcl::DistanceRequestd(cdata->req->enable_nearest_points), fcl_result);
+  double distance = fcl::distance(o1, o2, fcl::DistanceRequestd(cdata->req->enable_nearest_points), fcl_result);
 
   // Check if either object is already in the map. If not add it or if present
   // check to see if the new distance is closer. If closer remove the existing
   // one and add the new distance information.
-  if (d < dist_threshold)
+  if (distance < dist_threshold)
   {
-    DistanceResultsData dist_result;
+    // thread_local storage makes this variable persistent. We do not clear it at every iteration because all members
+    // get overwritten.
+    thread_local DistanceResultsData dist_result;
     dist_result.distance = fcl_result.min_distance;
+
+    // Careful here: Get the collision geometry data again, since FCL might
+    // swap o1 and o2 in the result.
+    const CollisionGeometryData* res_cd1 = static_cast<const CollisionGeometryData*>(fcl_result.o1->getUserData());
+    const CollisionGeometryData* res_cd2 = static_cast<const CollisionGeometryData*>(fcl_result.o2->getUserData());
+
 #if (MOVEIT_FCL_VERSION >= FCL_VERSION_CHECK(0, 6, 0))
     dist_result.nearest_points[0] = fcl_result.nearest_points[0];
     dist_result.nearest_points[1] = fcl_result.nearest_points[1];
 #else
-    dist_result.nearest_points[0] = Eigen::Vector3d(fcl_result.nearest_points[0].data.vs);
-    dist_result.nearest_points[1] = Eigen::Vector3d(fcl_result.nearest_points[1].data.vs);
+    dist_result.nearest_points[0] = Eigen::Map<const Eigen::Vector3d>(fcl_result.nearest_points[0].data.vs);
+    dist_result.nearest_points[1] = Eigen::Map<const Eigen::Vector3d>(fcl_result.nearest_points[1].data.vs);
 #endif
-    dist_result.link_names[0] = cd1->getID();
-    dist_result.link_names[1] = cd2->getID();
-    dist_result.body_types[0] = cd1->type;
-    dist_result.body_types[1] = cd2->type;
+    dist_result.link_names[0] = res_cd1->getID();
+    dist_result.link_names[1] = res_cd2->getID();
+    dist_result.body_types[0] = res_cd1->type;
+    dist_result.body_types[1] = res_cd2->type;
     if (cdata->req->enable_nearest_points)
     {
       dist_result.normal = (dist_result.nearest_points[1] - dist_result.nearest_points[0]).normalized();
     }
 
-    if (d <= 0 && cdata->req->enable_signed_distance)
+    if (distance <= 0 && cdata->req->enable_signed_distance)
     {
       dist_result.nearest_points[0].setZero();
       dist_result.nearest_points[1].setZero();
       dist_result.normal.setZero();
 
       fcl::CollisionRequestd coll_req;
-      fcl::CollisionResultd coll_res;
+      thread_local fcl::CollisionResultd coll_res;
+      coll_res.clear();  // thread_local storage makes the variable persistent. Ensure that it is cleared!
       coll_req.enable_contact = true;
       coll_req.num_max_contacts = 200;
       std::size_t contacts = fcl::collide(o1, o2, coll_req, coll_res);
@@ -578,15 +661,33 @@ bool distanceCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, void
 
         const fcl::Contactd& contact = coll_res.getContact(max_index);
         dist_result.distance = -contact.penetration_depth;
+
 #if (MOVEIT_FCL_VERSION >= FCL_VERSION_CHECK(0, 6, 0))
         dist_result.nearest_points[0] = contact.pos;
         dist_result.nearest_points[1] = contact.pos;
-        dist_result.normal = contact.normal;
 #else
-        dist_result.nearest_points[0] = Eigen::Vector3d(contact.pos.data.vs);
-        dist_result.nearest_points[1] = Eigen::Vector3d(contact.pos.data.vs);
-        dist_result.normal = Eigen::Vector3d(contact.normal.data.vs);
+        dist_result.nearest_points[0] = Eigen::Map<const Eigen::Vector3d>(contact.pos.data.vs);
+        dist_result.nearest_points[1] = Eigen::Map<const Eigen::Vector3d>(contact.pos.data.vs);
 #endif
+
+        if (cdata->req->enable_nearest_points)
+        {
+#if (MOVEIT_FCL_VERSION >= FCL_VERSION_CHECK(0, 6, 0))
+          Eigen::Vector3d normal(contact.normal);
+#else
+          Eigen::Vector3d normal(contact.normal.data.vs);
+#endif
+
+          // Check order of o1/o2 again, we might need to flip the normal
+          if (contact.o1 == o1->collisionGeometry().get())
+          {
+            dist_result.normal = normal;
+          }
+          else
+          {
+            dist_result.normal = -normal;
+          }
+        }
       }
     }
 
@@ -641,7 +742,7 @@ bool distanceCallback(fcl::CollisionObjectd* o1, fcl::CollisionObjectd* o2, void
  *
  * The returned cache is a quasi-singleton for each thread as it is created \e thread_local. */
 template <typename BV, typename T>
-FCLShapeCache& GetShapeCache()
+FCLShapeCache& getShapeCache()
 {
   /* The cache is created thread_local, that is each thread calling
    * this quasi-singleton function will get its own instance. Once
@@ -656,24 +757,6 @@ FCLShapeCache& GetShapeCache()
   return cache;
 }
 
-template <typename T1, typename T2>
-struct IfSameType
-{
-  enum
-  {
-    VALUE = 0
-  };
-};
-
-template <typename T>
-struct IfSameType<T, T>
-{
-  enum
-  {
-    VALUE = 1
-  };
-};
-
 /** \brief Templated helper function creating new collision geometry out of general object using an arbitrary bounding
  *  volume (BV).
  *
@@ -685,7 +768,7 @@ FCLGeometryConstPtr createCollisionGeometry(const shapes::ShapeConstPtr& shape, 
   using ShapeKey = shapes::ShapeConstWeakPtr;
   using ShapeMap = std::map<ShapeKey, FCLGeometryConstPtr, std::owner_less<ShapeKey>>;
 
-  FCLShapeCache& cache = GetShapeCache<BV, T>();
+  FCLShapeCache& cache = getShapeCache<BV, T>();
 
   shapes::ShapeConstWeakPtr wptr(shape);
   {
@@ -694,7 +777,7 @@ FCLGeometryConstPtr createCollisionGeometry(const shapes::ShapeConstPtr& shape, 
     {
       if (cache_it->second->collision_geometry_data_->ptr.raw == data)
       {
-        //        RCLCPP_DEBUG(LOGGER, "Collision data structures for object %s retrieved from
+        //        RCLCPP_DEBUG(getLogger(), "Collision data structures for object %s retrieved from
         //        cache.",
         //        cache_it->second->collision_geometry_data_->getID().c_str());
         return cache_it->second;
@@ -702,7 +785,7 @@ FCLGeometryConstPtr createCollisionGeometry(const shapes::ShapeConstPtr& shape, 
       else if (cache_it->second.unique())
       {
         const_cast<FCLGeometry*>(cache_it->second.get())->updateCollisionGeometryData(data, shape_index, false);
-        //          RCLCPP_DEBUG(LOGGER, "Collision data structures for object %s retrieved from
+        //          RCLCPP_DEBUG(getLogger(), "Collision data structures for object %s retrieved from
         //          cache after updating
         //          the source
         //          object.", cache_it->second->collision_geometry_data_->getID().c_str());
@@ -714,10 +797,10 @@ FCLGeometryConstPtr createCollisionGeometry(const shapes::ShapeConstPtr& shape, 
   // attached objects could have previously been World::Object; we try to move them
   // from their old cache to the new one, if possible. the code is not pretty, but should help
   // when we attach/detach objects that are in the world
-  if (IfSameType<T, moveit::core::AttachedBody>::VALUE == 1)
+  if (std::is_same<T, moveit::core::AttachedBody>::value)
   {
     // get the cache that corresponds to objects; maybe this attached object used to be a world object
-    FCLShapeCache& othercache = GetShapeCache<BV, World::Object>();
+    FCLShapeCache& othercache = getShapeCache<BV, World::Object>();
 
     // attached bodies could be just moved from the environment.
     auto cache_it = othercache.map_.find(wptr);
@@ -731,7 +814,7 @@ FCLGeometryConstPtr createCollisionGeometry(const shapes::ShapeConstPtr& shape, 
         // update the CollisionGeometryData; nobody has a pointer to this, so we can safely modify it
         const_cast<FCLGeometry*>(obj_cache.get())->updateCollisionGeometryData(data, shape_index, true);
 
-        //        RCLCPP_DEBUG(LOGGER, "Collision data structures for attached body %s retrieved
+        //        RCLCPP_DEBUG(getLogger(), "Collision data structures for attached body %s retrieved
         //        from the cache for
         //        world objects.",
         //        obj_cache->collision_geometry_data_->getID().c_str());
@@ -744,40 +827,40 @@ FCLGeometryConstPtr createCollisionGeometry(const shapes::ShapeConstPtr& shape, 
     }
   }
   else
-      // world objects could have previously been attached objects; we try to move them
-      // from their old cache to the new one, if possible. the code is not pretty, but should help
-      // when we attach/detach objects that are in the world
-      if (IfSameType<T, World::Object>::VALUE == 1)
-  {
-    // get the cache that corresponds to objects; maybe this attached object used to be a world object
-    FCLShapeCache& othercache = GetShapeCache<BV, moveit::core::AttachedBody>();
-
-    // attached bodies could be just moved from the environment.
-    auto cache_it = othercache.map_.find(wptr);
-    if (cache_it != othercache.map_.end())
+    // world objects could have previously been attached objects; we try to move them
+    // from their old cache to the new one, if possible. the code is not pretty, but should help
+    // when we attach/detach objects that are in the world
+    if (std::is_same<T, World::Object>::value)
     {
-      if (cache_it->second.unique())
+      // get the cache that corresponds to objects; maybe this attached object used to be a world object
+      FCLShapeCache& othercache = getShapeCache<BV, moveit::core::AttachedBody>();
+
+      // attached bodies could be just moved from the environment.
+      auto cache_it = othercache.map_.find(wptr);
+      if (cache_it != othercache.map_.end())
       {
-        // remove from old cache
-        FCLGeometryConstPtr obj_cache = cache_it->second;
-        othercache.map_.erase(cache_it);
+        if (cache_it->second.unique())
+        {
+          // remove from old cache
+          FCLGeometryConstPtr obj_cache = cache_it->second;
+          othercache.map_.erase(cache_it);
 
-        // update the CollisionGeometryData; nobody has a pointer to this, so we can safely modify it
-        const_cast<FCLGeometry*>(obj_cache.get())->updateCollisionGeometryData(data, shape_index, true);
+          // update the CollisionGeometryData; nobody has a pointer to this, so we can safely modify it
+          const_cast<FCLGeometry*>(obj_cache.get())->updateCollisionGeometryData(data, shape_index, true);
 
-        //          RCLCPP_DEBUG(LOGGER, "Collision data structures for world object %s retrieved
-        //          from the cache for
-        //          attached
-        //          bodies.",
-        //                   obj_cache->collision_geometry_data_->getID().c_str());
+          //          RCLCPP_DEBUG(getLogger(), "Collision data structures for world object %s retrieved
+          //          from the cache for
+          //          attached
+          //          bodies.",
+          //                   obj_cache->collision_geometry_data_->getID().c_str());
 
-        // add to the new cache
-        cache.map_[wptr] = obj_cache;
-        cache.bumpUseCount();
-        return obj_cache;
+          // add to the new cache
+          cache.map_[wptr] = obj_cache;
+          cache.bumpUseCount();
+          return obj_cache;
+        }
       }
     }
-  }
 
   fcl::CollisionGeometryd* cg_g = nullptr;
   // handle cases individually
@@ -822,8 +905,10 @@ FCLGeometryConstPtr createCollisionGeometry(const shapes::ShapeConstPtr& shape, 
       {
         std::vector<fcl::Triangle> tri_indices(mesh->triangle_count);
         for (unsigned int i = 0; i < mesh->triangle_count; ++i)
+        {
           tri_indices[i] =
               fcl::Triangle(mesh->triangles[3 * i], mesh->triangles[3 * i + 1], mesh->triangles[3 * i + 2]);
+        }
 
         std::vector<fcl::Vector3d> points(mesh->vertex_count);
         for (unsigned int i = 0; i < mesh->vertex_count; ++i)
@@ -843,14 +928,14 @@ FCLGeometryConstPtr createCollisionGeometry(const shapes::ShapeConstPtr& shape, 
     }
     break;
     default:
-      RCLCPP_ERROR(LOGGER, "This shape type (%d) is not supported using FCL yet", (int)shape->type);
+      RCLCPP_ERROR(getLogger(), "This shape type (%d) is not supported using FCL yet", static_cast<int>(shape->type));
       cg_g = nullptr;
   }
 
   if (cg_g)
   {
     cg_g->computeLocalAABB();
-    FCLGeometryConstPtr res(new FCLGeometry(cg_g, data, shape_index));
+    FCLGeometryConstPtr res = std::make_shared<const FCLGeometry>(cg_g, data, shape_index);
     cache.map_[wptr] = res;
     cache.bumpUseCount();
     return res;
@@ -883,7 +968,9 @@ FCLGeometryConstPtr createCollisionGeometry(const shapes::ShapeConstPtr& shape, 
 {
   if (fabs(scale - 1.0) <= std::numeric_limits<double>::epsilon() &&
       fabs(padding) <= std::numeric_limits<double>::epsilon())
+  {
     return createCollisionGeometry<BV, T>(shape, data, shape_index);
+  }
   else
   {
     shapes::ShapePtr scaled_shape(shape->clone());
@@ -912,11 +999,11 @@ FCLGeometryConstPtr createCollisionGeometry(const shapes::ShapeConstPtr& shape, 
 
 void cleanCollisionGeometryCache()
 {
-  FCLShapeCache& cache1 = GetShapeCache<fcl::OBBRSSd, World::Object>();
+  FCLShapeCache& cache1 = getShapeCache<fcl::OBBRSSd, World::Object>();
   {
     cache1.bumpUseCount(true);
   }
-  FCLShapeCache& cache2 = GetShapeCache<fcl::OBBRSSd, moveit::core::AttachedBody>();
+  FCLShapeCache& cache2 = getShapeCache<fcl::OBBRSSd, moveit::core::AttachedBody>();
   {
     cache2.bumpUseCount(true);
   }
@@ -925,9 +1012,13 @@ void cleanCollisionGeometryCache()
 void CollisionData::enableGroup(const moveit::core::RobotModelConstPtr& robot_model)
 {
   if (robot_model->hasJointModelGroup(req_->group_name))
+  {
     active_components_only_ = &robot_model->getJointModelGroup(req_->group_name)->getUpdatedLinkModelsSet();
+  }
   else
+  {
     active_components_only_ = nullptr;
+  }
 }
 
 void FCLObject::registerTo(fcl::BroadPhaseCollisionManagerd* manager)

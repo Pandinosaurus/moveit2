@@ -34,15 +34,33 @@
 
 /* Author: Ioan Sucan, Adam Leeper */
 
-#include <moveit/robot_trajectory/robot_trajectory.h>
-#include <moveit/robot_state/conversions.h>
-#include <tf2_eigen/tf2_eigen.h>
-#include <boost/math/constants/constants.hpp>
+#include <math.h>
+#include <moveit/robot_trajectory/robot_trajectory.hpp>
+#include <moveit/robot_state/conversions.hpp>
+#include <rclcpp/duration.hpp>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <rclcpp/time.hpp>
+#include <tf2_eigen/tf2_eigen.hpp>
 #include <numeric>
-#include "rclcpp/rclcpp.hpp"
+#include <optional>
+#include <moveit/utils/logger.hpp>
 
 namespace robot_trajectory
 {
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.core.robot_trajectory");
+}
+}  // namespace
+
+RobotTrajectory::RobotTrajectory(const moveit::core::RobotModelConstPtr& robot_model)
+  : robot_model_(robot_model), group_(nullptr)
+{
+}
+
 RobotTrajectory::RobotTrajectory(const moveit::core::RobotModelConstPtr& robot_model, const std::string& group)
   : robot_model_(robot_model), group_(group.empty() ? nullptr : robot_model->getJointModelGroup(group))
 {
@@ -59,17 +77,12 @@ RobotTrajectory::RobotTrajectory(const RobotTrajectory& other, bool deepcopy)
   *this = other;  // default assignment operator performs a shallow copy
   if (deepcopy)
   {
-    this->waypoints_.clear();
+    waypoints_.clear();
     for (const auto& waypoint : other.waypoints_)
     {
-      this->waypoints_.emplace_back(std::make_shared<moveit::core::RobotState>(*waypoint));
+      waypoints_.emplace_back(std::make_shared<moveit::core::RobotState>(*waypoint));
     }
   }
-}
-
-void RobotTrajectory::setGroupName(const std::string& group_name)
-{
-  group_ = robot_model_->getJointModelGroup(group_name);
 }
 
 const std::string& RobotTrajectory::getGroupName() const
@@ -88,12 +101,27 @@ double RobotTrajectory::getDuration() const
 double RobotTrajectory::getAverageSegmentDuration() const
 {
   if (duration_from_previous_.empty())
+  {
+    RCLCPP_WARN(getLogger(), "Too few waypoints to calculate a duration. Returning 0.");
     return 0.0;
+  }
+
+  // If the initial segment has a duration of 0, exclude it from the average calculation
+  if (duration_from_previous_[0] == 0)
+  {
+    if (duration_from_previous_.size() <= 1)
+    {
+      RCLCPP_WARN(getLogger(), "First and only waypoint has a duration of 0.");
+      return 0.0;
+    }
+    else
+      return getDuration() / static_cast<double>(duration_from_previous_.size() - 1);
+  }
   else
     return getDuration() / static_cast<double>(duration_from_previous_.size());
 }
 
-void RobotTrajectory::swap(RobotTrajectory& other)
+void RobotTrajectory::swap(RobotTrajectory& other) noexcept
 {
   robot_model_.swap(other.robot_model_);
   std::swap(group_, other.group_);
@@ -101,11 +129,11 @@ void RobotTrajectory::swap(RobotTrajectory& other)
   duration_from_previous_.swap(other.duration_from_previous_);
 }
 
-void RobotTrajectory::append(const RobotTrajectory& source, double dt, size_t start_index, size_t end_index)
+RobotTrajectory& RobotTrajectory::append(const RobotTrajectory& source, double dt, size_t start_index, size_t end_index)
 {
   end_index = std::min(end_index, source.waypoints_.size());
   if (start_index >= end_index)
-    return;
+    return *this;
   waypoints_.insert(waypoints_.end(), std::next(source.waypoints_.begin(), start_index),
                     std::next(source.waypoints_.begin(), end_index));
   std::size_t index = duration_from_previous_.size();
@@ -113,10 +141,12 @@ void RobotTrajectory::append(const RobotTrajectory& source, double dt, size_t st
                                  std::next(source.duration_from_previous_.begin(), start_index),
                                  std::next(source.duration_from_previous_.begin(), end_index));
   if (duration_from_previous_.size() > index)
-    duration_from_previous_[index] += dt;
+    duration_from_previous_[index] = dt;
+
+  return *this;
 }
 
-void RobotTrajectory::reverse()
+RobotTrajectory& RobotTrajectory::reverse()
 {
   std::reverse(waypoints_.begin(), waypoints_.end());
   for (moveit::core::RobotStatePtr& waypoint : waypoints_)
@@ -130,12 +160,14 @@ void RobotTrajectory::reverse()
     std::reverse(duration_from_previous_.begin(), duration_from_previous_.end());
     duration_from_previous_.pop_back();
   }
+
+  return *this;
 }
 
-void RobotTrajectory::unwind()
+RobotTrajectory& RobotTrajectory::unwind()
 {
   if (waypoints_.empty())
-    return;
+    return *this;
 
   const std::vector<const moveit::core::JointModel*>& cont_joints =
       group_ ? group_->getContinuousJointModels() : robot_model_->getContinuousJointModels();
@@ -145,32 +177,39 @@ void RobotTrajectory::unwind()
     // unwrap continuous joints
     double running_offset = 0.0;
     double last_value = waypoints_[0]->getJointPositions(cont_joint)[0];
+    cont_joint->enforcePositionBounds(&last_value);
+    waypoints_[0]->setJointPositions(cont_joint, &last_value);
 
     for (std::size_t j = 1; j < waypoints_.size(); ++j)
     {
       double current_value = waypoints_[j]->getJointPositions(cont_joint)[0];
-      if (last_value > current_value + boost::math::constants::pi<double>())
-        running_offset += 2.0 * boost::math::constants::pi<double>();
-      else if (current_value > last_value + boost::math::constants::pi<double>())
-        running_offset -= 2.0 * boost::math::constants::pi<double>();
+      cont_joint->enforcePositionBounds(&current_value);
+      if (last_value > current_value + M_PI)
+      {
+        running_offset += 2.0 * M_PI;
+      }
+      else if (current_value > last_value + M_PI)
+      {
+        running_offset -= 2.0 * M_PI;
+      }
 
       last_value = current_value;
-      if (running_offset > std::numeric_limits<double>::epsilon() ||
-          running_offset < -std::numeric_limits<double>::epsilon())
-      {
-        current_value += running_offset;
-        waypoints_[j]->setJointPositions(cont_joint, &current_value);
-      }
+      current_value += running_offset;
+      waypoints_[j]->setJointPositions(cont_joint, &current_value);
     }
   }
   for (moveit::core::RobotStatePtr& waypoint : waypoints_)
+  {
     waypoint->update();
+  }
+
+  return *this;
 }
 
-void RobotTrajectory::unwind(const moveit::core::RobotState& state)
+RobotTrajectory& RobotTrajectory::unwind(const moveit::core::RobotState& state)
 {
   if (waypoints_.empty())
-    return;
+    return *this;
 
   const std::vector<const moveit::core::JointModel*>& cont_joints =
       group_ ? group_->getContinuousJointModels() : robot_model_->getContinuousJointModels();
@@ -185,38 +224,42 @@ void RobotTrajectory::unwind(const moveit::core::RobotState& state)
     double running_offset = reference_value0 - reference_value;
 
     double last_value = waypoints_[0]->getJointPositions(cont_joint)[0];
-    if (running_offset > std::numeric_limits<double>::epsilon() ||
-        running_offset < -std::numeric_limits<double>::epsilon())
+    cont_joint->enforcePositionBounds(&last_value);
+    if (last_value > reference_value + M_PI)
     {
-      double current_value = last_value + running_offset;
-      waypoints_[0]->setJointPositions(cont_joint, &current_value);
+      running_offset -= 2.0 * M_PI;
     }
+    else if (last_value < reference_value - M_PI)
+    {
+      running_offset += 2.0 * M_PI;
+    }
+    double current_start_value = last_value + running_offset;
+    waypoints_[0]->setJointPositions(cont_joint, &current_start_value);
 
     for (std::size_t j = 1; j < waypoints_.size(); ++j)
     {
       double current_value = waypoints_[j]->getJointPositions(cont_joint)[0];
-      if (last_value > current_value + boost::math::constants::pi<double>())
-        running_offset += 2.0 * boost::math::constants::pi<double>();
-      else if (current_value > last_value + boost::math::constants::pi<double>())
-        running_offset -= 2.0 * boost::math::constants::pi<double>();
+      cont_joint->enforcePositionBounds(&current_value);
+      if (last_value > current_value + M_PI)
+      {
+        running_offset += 2.0 * M_PI;
+      }
+      else if (current_value > last_value + M_PI)
+      {
+        running_offset -= 2.0 * M_PI;
+      }
 
       last_value = current_value;
-      if (running_offset > std::numeric_limits<double>::epsilon() ||
-          running_offset < -std::numeric_limits<double>::epsilon())
-      {
-        current_value += running_offset;
-        waypoints_[j]->setJointPositions(cont_joint, &current_value);
-      }
+      current_value += running_offset;
+      waypoints_[j]->setJointPositions(cont_joint, &current_value);
     }
   }
   for (moveit::core::RobotStatePtr& waypoint : waypoints_)
+  {
     waypoint->update();
-}
+  }
 
-void RobotTrajectory::clear()
-{
-  waypoints_.clear();
-  duration_from_previous_.clear();
+  return *this;
 }
 
 void RobotTrajectory::getRobotTrajectoryMsg(moveit_msgs::msg::RobotTrajectory& trajectory,
@@ -266,7 +309,7 @@ void RobotTrajectory::getRobotTrajectoryMsg(moveit_msgs::msg::RobotTrajectory& t
     trajectory.multi_dof_joint_trajectory.points.resize(waypoints_.size());
   }
 
-  static const rclcpp::Duration ZERO_DURATION(0.0);
+  static const auto ZERO_DURATION = rclcpp::Duration::from_seconds(0);
   double total_time = 0.0;
   for (std::size_t i = 0; i < waypoints_.size(); ++i)
   {
@@ -284,14 +327,20 @@ void RobotTrajectory::getRobotTrajectoryMsg(moveit_msgs::msg::RobotTrajectory& t
             waypoints_[i]->getVariablePosition(onedof[j]->getFirstVariableIndex());
         // if we have velocities/accelerations/effort, copy those too
         if (waypoints_[i]->hasVelocities())
+        {
           trajectory.joint_trajectory.points[i].velocities.push_back(
               waypoints_[i]->getVariableVelocity(onedof[j]->getFirstVariableIndex()));
+        }
         if (waypoints_[i]->hasAccelerations())
+        {
           trajectory.joint_trajectory.points[i].accelerations.push_back(
               waypoints_[i]->getVariableAcceleration(onedof[j]->getFirstVariableIndex()));
+        }
         if (waypoints_[i]->hasEffort())
+        {
           trajectory.joint_trajectory.points[i].effort.push_back(
               waypoints_[i]->getVariableEffort(onedof[j]->getFirstVariableIndex()));
+        }
       }
       // clear velocities if we have an incomplete specification
       if (trajectory.joint_trajectory.points[i].velocities.size() != onedof.size())
@@ -304,9 +353,13 @@ void RobotTrajectory::getRobotTrajectoryMsg(moveit_msgs::msg::RobotTrajectory& t
         trajectory.joint_trajectory.points[i].effort.clear();
 
       if (duration_from_previous_.size() > i)
+      {
         trajectory.joint_trajectory.points[i].time_from_start = rclcpp::Duration::from_seconds(total_time);
+      }
       else
+      {
         trajectory.joint_trajectory.points[i].time_from_start = ZERO_DURATION;
+      }
     }
     if (!mdof.empty())
     {
@@ -320,44 +373,55 @@ void RobotTrajectory::getRobotTrajectoryMsg(moveit_msgs::msg::RobotTrajectory& t
         {
           const std::vector<std::string> names = mdof[j]->getVariableNames();
           const double* velocities = waypoints_[i]->getJointVelocities(mdof[j]);
+          const double* accelerations = waypoints_[i]->getJointAccelerations(mdof[j]);
 
           geometry_msgs::msg::Twist point_velocity;
+          geometry_msgs::msg::Twist point_acceleration;
 
           for (std::size_t k = 0; k < names.size(); ++k)
           {
             if (names[k].find("/x") != std::string::npos)
             {
               point_velocity.linear.x = velocities[k];
+              point_acceleration.linear.x = accelerations[k];
             }
             else if (names[k].find("/y") != std::string::npos)
             {
               point_velocity.linear.y = velocities[k];
+              point_acceleration.linear.y = accelerations[k];
             }
             else if (names[k].find("/z") != std::string::npos)
             {
               point_velocity.linear.z = velocities[k];
+              point_acceleration.linear.z = accelerations[k];
             }
             else if (names[k].find("/theta") != std::string::npos)
             {
               point_velocity.angular.z = velocities[k];
+              point_acceleration.angular.z = accelerations[k];
             }
           }
           trajectory.multi_dof_joint_trajectory.points[i].velocities.push_back(point_velocity);
+          trajectory.multi_dof_joint_trajectory.points[i].accelerations.push_back(point_acceleration);
         }
       }
       if (duration_from_previous_.size() > i)
+      {
         trajectory.multi_dof_joint_trajectory.points[i].time_from_start = rclcpp::Duration::from_seconds(total_time);
+      }
       else
+      {
         trajectory.multi_dof_joint_trajectory.points[i].time_from_start = ZERO_DURATION;
+      }
     }
   }
 }
 
-void RobotTrajectory::setRobotTrajectoryMsg(const moveit::core::RobotState& reference_state,
-                                            const trajectory_msgs::msg::JointTrajectory& trajectory)
+RobotTrajectory& RobotTrajectory::setRobotTrajectoryMsg(const moveit::core::RobotState& reference_state,
+                                                        const trajectory_msgs::msg::JointTrajectory& trajectory)
 {
   // make a copy just in case the next clear() removes the memory for the reference passed in
-  const moveit::core::RobotState& copy = reference_state;
+  const moveit::core::RobotState copy(reference_state);  // NOLINT(performance-unnecessary-copy-initialization)
   clear();
   std::size_t state_count = trajectory.points.size();
   rclcpp::Time last_time_stamp = trajectory.header.stamp;
@@ -366,7 +430,7 @@ void RobotTrajectory::setRobotTrajectoryMsg(const moveit::core::RobotState& refe
   for (std::size_t i = 0; i < state_count; ++i)
   {
     this_time_stamp = rclcpp::Time(trajectory.header.stamp) + trajectory.points[i].time_from_start;
-    moveit::core::RobotStatePtr st(new moveit::core::RobotState(copy));
+    auto st = std::make_shared<moveit::core::RobotState>(copy);
     st->setVariablePositions(trajectory.joint_names, trajectory.points[i].positions);
     if (!trajectory.points[i].velocities.empty())
       st->setVariableVelocities(trajectory.joint_names, trajectory.points[i].velocities);
@@ -377,10 +441,12 @@ void RobotTrajectory::setRobotTrajectoryMsg(const moveit::core::RobotState& refe
     addSuffixWayPoint(st, (this_time_stamp - last_time_stamp).seconds());
     last_time_stamp = this_time_stamp;
   }
+
+  return *this;
 }
 
-void RobotTrajectory::setRobotTrajectoryMsg(const moveit::core::RobotState& reference_state,
-                                            const moveit_msgs::msg::RobotTrajectory& trajectory)
+RobotTrajectory& RobotTrajectory::setRobotTrajectoryMsg(const moveit::core::RobotState& reference_state,
+                                                        const moveit_msgs::msg::RobotTrajectory& trajectory)
 {
   // make a copy just in case the next clear() removes the memory for the reference passed in
   const moveit::core::RobotState& copy = reference_state;
@@ -395,16 +461,20 @@ void RobotTrajectory::setRobotTrajectoryMsg(const moveit::core::RobotState& refe
 
   for (std::size_t i = 0; i < state_count; ++i)
   {
-    moveit::core::RobotStatePtr st(new moveit::core::RobotState(copy));
+    auto st = std::make_shared<moveit::core::RobotState>(copy);
     if (trajectory.joint_trajectory.points.size() > i)
     {
       st->setVariablePositions(trajectory.joint_trajectory.joint_names, trajectory.joint_trajectory.points[i].positions);
       if (!trajectory.joint_trajectory.points[i].velocities.empty())
+      {
         st->setVariableVelocities(trajectory.joint_trajectory.joint_names,
                                   trajectory.joint_trajectory.points[i].velocities);
+      }
       if (!trajectory.joint_trajectory.points[i].accelerations.empty())
+      {
         st->setVariableAccelerations(trajectory.joint_trajectory.joint_names,
                                      trajectory.joint_trajectory.points[i].accelerations);
+      }
       if (!trajectory.joint_trajectory.points[i].effort.empty())
         st->setVariableEffort(trajectory.joint_trajectory.joint_names, trajectory.joint_trajectory.points[i].effort);
       this_time_stamp = rclcpp::Time(trajectory.joint_trajectory.header.stamp) +
@@ -424,18 +494,19 @@ void RobotTrajectory::setRobotTrajectoryMsg(const moveit::core::RobotState& refe
     addSuffixWayPoint(st, (this_time_stamp - last_time_stamp).seconds());
     last_time_stamp = this_time_stamp;
   }
+  return *this;
 }
 
-void RobotTrajectory::setRobotTrajectoryMsg(const moveit::core::RobotState& reference_state,
-                                            const moveit_msgs::msg::RobotState& state,
-                                            const moveit_msgs::msg::RobotTrajectory& trajectory)
+RobotTrajectory& RobotTrajectory::setRobotTrajectoryMsg(const moveit::core::RobotState& reference_state,
+                                                        const moveit_msgs::msg::RobotState& state,
+                                                        const moveit_msgs::msg::RobotTrajectory& trajectory)
 {
   moveit::core::RobotState st(reference_state);
   moveit::core::robotStateMsgToRobotState(state, st);
-  setRobotTrajectoryMsg(st, trajectory);
+  return setRobotTrajectoryMsg(st, trajectory);
 }
 
-void RobotTrajectory::findWayPointIndicesForDurationAfterStart(const double& duration, int& before, int& after,
+void RobotTrajectory::findWayPointIndicesForDurationAfterStart(double duration, int& before, int& after,
                                                                double& blend) const
 {
   if (duration < 0.0)
@@ -446,7 +517,7 @@ void RobotTrajectory::findWayPointIndicesForDurationAfterStart(const double& dur
     return;
   }
 
-  // Find indicies
+  // Find indices
   std::size_t index = 0, num_points = waypoints_.size();
   double running_duration = 0.0;
   for (; index < num_points; ++index)
@@ -461,9 +532,13 @@ void RobotTrajectory::findWayPointIndicesForDurationAfterStart(const double& dur
   // Compute duration blend
   double before_time = running_duration - duration_from_previous_[index];
   if (after == before)
+  {
     blend = 1.0;
+  }
   else
+  {
     blend = (duration - before_time) / duration_from_previous_[index];
+  }
 }
 
 double RobotTrajectory::getWayPointDurationFromStart(std::size_t index) const
@@ -477,11 +552,6 @@ double RobotTrajectory::getWayPointDurationFromStart(std::size_t index) const
   for (std::size_t i = 0; i <= index; ++i)
     time += duration_from_previous_[i];
   return time;
-}
-
-double RobotTrajectory::getWaypointDurationFromStart(std::size_t index) const
-{
-  return getWayPointDurationFromStart(index);
 }
 
 bool RobotTrajectory::getStateAtDurationFromStart(const double request_duration,
@@ -498,6 +568,275 @@ bool RobotTrajectory::getStateAtDurationFromStart(const double request_duration,
   // after);
   waypoints_[before]->interpolate(*waypoints_[after], blend, *output_state);
   return true;
+}
+
+void RobotTrajectory::print(std::ostream& out, std::vector<int> variable_indexes) const
+{
+  size_t num_points = getWayPointCount();
+  if (num_points == 0)
+  {
+    out << "Empty trajectory.";
+    return;
+  }
+
+  std::ios::fmtflags old_settings = out.flags();
+  int old_precision = out.precision();
+  out << std::fixed << std::setprecision(3);
+
+  out << "Trajectory has " << num_points << " points over " << getDuration() << " seconds\n";
+
+  if (variable_indexes.empty())
+  {
+    if (group_)
+    {
+      variable_indexes = group_->getVariableIndexList();
+    }
+    else
+    {
+      // use all variables
+      variable_indexes.resize(robot_model_->getVariableCount());
+      std::iota(variable_indexes.begin(), variable_indexes.end(), 0);
+    }
+  }
+
+  for (size_t p_i = 0; p_i < num_points; ++p_i)
+  {
+    const moveit::core::RobotState& point = getWayPoint(p_i);
+    out << "  waypoint " << std::setw(3) << p_i;
+    out << " time " << std::setw(5) << getWayPointDurationFromStart(p_i);
+    out << " pos ";
+    for (int index : variable_indexes)
+    {
+      out << std::setw(6) << point.getVariablePosition(index) << ' ';
+    }
+    if (point.hasVelocities())
+    {
+      out << "vel ";
+      for (int index : variable_indexes)
+      {
+        out << std::setw(6) << point.getVariableVelocity(index) << ' ';
+      }
+    }
+    if (point.hasAccelerations())
+    {
+      out << "acc ";
+      for (int index : variable_indexes)
+      {
+        out << std::setw(6) << point.getVariableAcceleration(index) << ' ';
+      }
+    }
+    if (point.hasEffort())
+    {
+      out << "eff ";
+      for (int index : variable_indexes)
+      {
+        out << std::setw(6) << point.getVariableEffort(index) << ' ';
+      }
+    }
+    out << '\n';
+  }
+
+  out.flags(old_settings);
+  out.precision(old_precision);
+  out.flush();
+}
+
+std::ostream& operator<<(std::ostream& out, const RobotTrajectory& trajectory)
+{
+  trajectory.print(out);
+  return out;
+}
+
+double pathLength(const RobotTrajectory& trajectory)
+{
+  auto trajectory_length = 0.0;
+  for (std::size_t index = 1; index < trajectory.getWayPointCount(); ++index)
+  {
+    const auto& first = trajectory.getWayPoint(index - 1);
+    const auto& second = trajectory.getWayPoint(index);
+    trajectory_length += first.distance(second);
+  }
+  return trajectory_length;
+}
+
+std::optional<double> smoothness(const RobotTrajectory& trajectory)
+{
+  if (trajectory.getWayPointCount() > 2)
+  {
+    auto smoothness = 0.0;
+    double a = trajectory.getWayPoint(0).distance(trajectory.getWayPoint(1));
+    for (std::size_t k = 2; k < trajectory.getWayPointCount(); ++k)
+    {
+      // view the path as a sequence of segments, and look at the triangles it forms:
+      //          s1
+      //          /\          s4
+      //      a  /  \ b       |
+      //        /    \        |
+      //       /......\_______|
+      //     s0    c   s2     s3
+
+      // use Pythagoras generalized theorem to find the cos of the angle between segments a and b
+      double b = trajectory.getWayPoint(k - 1).distance(trajectory.getWayPoint(k));
+      double cdist = trajectory.getWayPoint(k - 2).distance(trajectory.getWayPoint(k));
+      double acos_value = (a * a + b * b - cdist * cdist) / (2.0 * a * b);
+      if (acos_value > -1.0 && acos_value < 1.0)
+      {
+        // the smoothness is actually the outside angle of the one we compute
+        double angle = (M_PI - acos(acos_value));
+
+        // and we normalize by the length of the segments
+        double u = 2.0 * angle;  /// (a + b);
+        smoothness += u * u;
+      }
+      a = b;
+    }
+    smoothness /= static_cast<double>(trajectory.getWayPointCount());
+    return smoothness;
+  }
+  // In case the path is to short, no value is returned
+  return std::nullopt;
+}
+
+std::optional<double> waypointDensity(const RobotTrajectory& trajectory)
+{
+  // Only calculate density if more than one waypoint exists
+  if (trajectory.getWayPointCount() > 1)
+  {
+    // Calculate path length
+    const auto length = pathLength(trajectory);
+    if (length > 0.0)
+    {
+      auto density = static_cast<double>(trajectory.getWayPointCount()) / length;
+      return density;
+    }
+  }
+  // Trajectory is empty, a single point or path length is zero
+  return std::nullopt;
+}
+
+std::optional<trajectory_msgs::msg::JointTrajectory> toJointTrajectory(const RobotTrajectory& trajectory,
+                                                                       bool include_mdof_joints,
+                                                                       const std::vector<std::string>& joint_filter)
+{
+  const auto group = trajectory.getGroup();
+  const auto& robot_model = trajectory.getRobotModel();
+  const std::vector<const moveit::core::JointModel*>& jnts =
+      group ? group->getActiveJointModels() : robot_model->getActiveJointModels();
+
+  if (trajectory.empty() || jnts.empty())
+    return std::nullopt;
+
+  trajectory_msgs::msg::JointTrajectory joint_trajectory;
+  std::vector<const moveit::core::JointModel*> onedof;
+  std::vector<const moveit::core::JointModel*> mdof;
+
+  for (const moveit::core::JointModel* active_joint : jnts)
+  {
+    // only consider joints listed in joint_filter
+    if (!joint_filter.empty() &&
+        std::find(joint_filter.begin(), joint_filter.end(), active_joint->getName()) == joint_filter.end())
+      continue;
+
+    if (active_joint->getVariableCount() == 1)
+    {
+      onedof.push_back(active_joint);
+    }
+    else if (include_mdof_joints)
+    {
+      mdof.push_back(active_joint);
+    }
+  }
+
+  for (const auto& joint : onedof)
+  {
+    joint_trajectory.joint_names.push_back(joint->getName());
+  }
+  for (const auto& joint : mdof)
+  {
+    for (const auto& name : joint->getVariableNames())
+    {
+      joint_trajectory.joint_names.push_back(name);
+    }
+  }
+
+  if (!onedof.empty() || !mdof.empty())
+  {
+    joint_trajectory.header.frame_id = robot_model->getModelFrame();
+    joint_trajectory.header.stamp = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    joint_trajectory.points.resize(trajectory.getWayPointCount());
+  }
+
+  static const auto ZERO_DURATION = rclcpp::Duration::from_seconds(0);
+  double total_time = 0.0;
+  for (std::size_t i = 0; i < trajectory.getWayPointCount(); ++i)
+  {
+    total_time += trajectory.getWayPointDurationFromPrevious(i);
+    joint_trajectory.points[i].time_from_start = rclcpp::Duration::from_seconds(total_time);
+    const auto& waypoint = trajectory.getWayPoint(i);
+
+    if (!onedof.empty())
+    {
+      joint_trajectory.points[i].positions.resize(onedof.size());
+      joint_trajectory.points[i].velocities.reserve(onedof.size());
+
+      for (std::size_t j = 0; j < onedof.size(); ++j)
+      {
+        joint_trajectory.points[i].positions[j] = waypoint.getVariablePosition(onedof[j]->getFirstVariableIndex());
+        // if we have velocities/accelerations/effort, copy those too
+        if (waypoint.hasVelocities())
+        {
+          joint_trajectory.points[i].velocities.push_back(
+              waypoint.getVariableVelocity(onedof[j]->getFirstVariableIndex()));
+        }
+        if (waypoint.hasAccelerations())
+        {
+          joint_trajectory.points[i].accelerations.push_back(
+              waypoint.getVariableAcceleration(onedof[j]->getFirstVariableIndex()));
+        }
+        if (waypoint.hasEffort())
+        {
+          joint_trajectory.points[i].effort.push_back(waypoint.getVariableEffort(onedof[j]->getFirstVariableIndex()));
+        }
+      }
+      // clear velocities if we have an incomplete specification
+      if (joint_trajectory.points[i].velocities.size() != onedof.size())
+        joint_trajectory.points[i].velocities.clear();
+      // clear accelerations if we have an incomplete specification
+      if (joint_trajectory.points[i].accelerations.size() != onedof.size())
+        joint_trajectory.points[i].accelerations.clear();
+      // clear effort if we have an incomplete specification
+      if (joint_trajectory.points[i].effort.size() != onedof.size())
+        joint_trajectory.points[i].effort.clear();
+    }
+
+    if (!mdof.empty())
+    {
+      for (const auto joint : mdof)
+      {
+        // Add variable placeholders
+        const std::vector<std::string> names = joint->getVariableNames();
+        joint_trajectory.points[i].positions.reserve(joint_trajectory.points[i].positions.size() + names.size());
+
+        joint_trajectory.points[i].velocities.reserve(joint_trajectory.points[i].velocities.size() + names.size());
+
+        for (const auto& name : names)
+        {
+          joint_trajectory.points[i].positions.push_back(waypoint.getVariablePosition(name));
+
+          if (waypoint.hasVelocities())
+          {
+            joint_trajectory.points[i].velocities.push_back(waypoint.getVariableVelocity(name));
+          }
+          if (waypoint.hasAccelerations())
+          {
+            joint_trajectory.points[i].accelerations.push_back(waypoint.getVariableAcceleration(name));
+          }
+        }
+      }
+    }
+  }
+
+  return joint_trajectory;
 }
 
 }  // end of namespace robot_trajectory

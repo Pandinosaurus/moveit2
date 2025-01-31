@@ -34,25 +34,32 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/transforms/transforms.h>
+#include <moveit/transforms/transforms.hpp>
 #include <geometric_shapes/check_isometry.h>
-#include <tf2_eigen/tf2_eigen.h>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <tf2_eigen/tf2_eigen.hpp>
 #include <boost/algorithm/string/trim.hpp>
-#include "rclcpp/rclcpp.hpp"
+#include <moveit/utils/logger.hpp>
 
 namespace moveit
 {
 namespace core
 {
-// Logger
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_transforms.transforms");
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.core.transforms");
+}
+}  // namespace
 
 Transforms::Transforms(const std::string& target_frame) : target_frame_(target_frame)
 {
   boost::trim(target_frame_);
   if (target_frame_.empty())
   {
-    RCLCPP_ERROR(LOGGER, "The target frame for MoveIt Transforms cannot be empty.");
+    RCLCPP_ERROR(getLogger(), "The target frame for MoveIt Transforms cannot be empty.");
   }
   else
   {
@@ -91,9 +98,13 @@ void Transforms::setAllTransforms(const FixedTransformsMap& transforms)
 bool Transforms::isFixedFrame(const std::string& frame) const
 {
   if (frame.empty())
+  {
     return false;
+  }
   else
+  {
     return transforms_map_.find(frame) != transforms_map_.end();
+  }
 }
 
 const Eigen::Isometry3d& Transforms::getTransform(const std::string& from_frame) const
@@ -106,8 +117,8 @@ const Eigen::Isometry3d& Transforms::getTransform(const std::string& from_frame)
     // If no transform found in map, return identity
   }
 
-  RCLCPP_ERROR(LOGGER, "Unable to transform from frame '%s' to frame '%s'. Returning identity.", from_frame.c_str(),
-               target_frame_.c_str());
+  RCLCPP_ERROR(getLogger(), "Unable to transform from frame '%s' to frame '%s'. Returning identity.",
+               from_frame.c_str(), target_frame_.c_str());
 
   // return identity
   static const Eigen::Isometry3d IDENTITY = Eigen::Isometry3d::Identity();
@@ -117,9 +128,13 @@ const Eigen::Isometry3d& Transforms::getTransform(const std::string& from_frame)
 bool Transforms::canTransform(const std::string& from_frame) const
 {
   if (from_frame.empty())
+  {
     return false;
+  }
   else
+  {
     return transforms_map_.find(from_frame) != transforms_map_.end();
+  }
 }
 
 void Transforms::setTransform(const Eigen::Isometry3d& t, const std::string& from_frame)
@@ -127,7 +142,7 @@ void Transforms::setTransform(const Eigen::Isometry3d& t, const std::string& fro
   ASSERT_ISOMETRY(t)  // unsanitized input, could contain a non-isometry
   if (from_frame.empty())
   {
-    RCLCPP_ERROR(LOGGER, "Cannot record transform with empty name");
+    RCLCPP_ERROR(getLogger(), "Cannot record transform with empty name");
   }
   else
     transforms_map_[from_frame] = t;
@@ -137,12 +152,19 @@ void Transforms::setTransform(const geometry_msgs::msg::TransformStamped& transf
 {
   if (sameFrame(transform.child_frame_id, target_frame_))
   {
-    Eigen::Isometry3d t = tf2::transformToEigen(transform);
-    setTransform(t, transform.header.frame_id);
+    // convert message manually to ensure correct normalization for double (error < 1e-12)
+    // tf2 only enforces float normalization (error < 1e-5)
+    const auto& trans = transform.transform.translation;
+    const auto& rot = transform.transform.rotation;
+    Eigen::Translation3d translation(trans.x, trans.y, trans.z);
+    Eigen::Quaterniond rotation(rot.w, rot.x, rot.y, rot.z);
+    rotation.normalize();
+
+    setTransform(translation * rotation, transform.header.frame_id);
   }
   else
   {
-    RCLCPP_ERROR(LOGGER, "Given transform is to frame '%s', but frame '%s' was expected.",
+    RCLCPP_ERROR(getLogger(), "Given transform is to frame '%s', but frame '%s' was expected.",
                  transform.child_frame_id.c_str(), target_frame_.c_str());
   }
 }

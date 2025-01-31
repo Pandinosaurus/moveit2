@@ -34,11 +34,19 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/version.h>
-#include <cstdio>
+#include <moveit/version.hpp>
+#include <iostream>
+#include <cstring>
 
-int main(int argc, char** argv)
+int main(int /*argc*/, char** /*argv*/)
 {
-  printf("%s\n", MOVEIT_VERSION);
+  std::cout << MOVEIT_VERSION_STR;
+  if (strlen(MOVEIT_GIT_COMMIT_HASH))
+  {
+    std::cout << ", git commit: " << MOVEIT_GIT_COMMIT_HASH;
+    if (strlen(MOVEIT_GIT_NAME))
+      std::cout << " (" << MOVEIT_GIT_NAME << ")";
+  }
+  std::cout << '\n';
   return 0;
 }

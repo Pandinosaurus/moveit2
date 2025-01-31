@@ -34,9 +34,20 @@
 
 /* Author: Ioan Sucan */
 
-#include <rclcpp/rclcpp.hpp>
-#include <moveit/planning_scene_monitor/planning_scene_monitor.h>
-#include <tf2_ros/transform_listener.h>
+#include <moveit/planning_scene_monitor/planning_scene_monitor.hpp>
+#include <rclcpp/duration.hpp>
+#include <rclcpp/executors/multi_threaded_executor.hpp>
+#include <rclcpp/node.hpp>
+#include <rclcpp/publisher.hpp>
+#include <rclcpp/version.h>
+#include <moveit/utils/logger.hpp>
+#if RCLCPP_VERSION_GTE(20, 0, 0)
+#include <rclcpp/event_handler.hpp>
+#else
+#include <rclcpp/qos_event.hpp>
+#endif
+#include <rclcpp/time.hpp>
+#include <rclcpp/utilities.hpp>
 #include <memory>
 
 static const std::string ROBOT_DESCRIPTION = "robot_description";
@@ -45,24 +56,21 @@ int main(int argc, char** argv)
 {
   rclcpp::init(argc, argv);
   auto node = rclcpp::Node::make_shared("visualize_robot_collision_volume");
+  moveit::setNodeLoggerName(node->get_name());
 
   rclcpp::executors::MultiThreadedExecutor executor;
   executor.add_node(node);
   double radius = 0.02;
-  double lifetime = 600.0;
+  int lifetime = 600;
 
-  std::shared_ptr<tf2_ros::Buffer> tf_buffer = std::make_shared<tf2_ros::Buffer>(node->get_clock());
-  std::shared_ptr<tf2_ros::TransformListener> tf_listener =
-      std::make_shared<tf2_ros::TransformListener>(*tf_buffer, node);
-  planning_scene_monitor::PlanningSceneMonitor psm(node, ROBOT_DESCRIPTION, tf_buffer);
+  planning_scene_monitor::PlanningSceneMonitor psm(node, ROBOT_DESCRIPTION);
   if (psm.getPlanningScene())
   {
     psm.startWorldGeometryMonitor();
     psm.startSceneMonitor();
     psm.startStateMonitor();
     auto pub_markers = node->create_publisher<visualization_msgs::msg::MarkerArray>("visualization_marker_array", 10);
-    std::cout << "\nListening for planning scene...\nType the number of spheres to generate and press Enter: "
-              << std::endl;
+    std::cout << "\nListening for planning scene...\nType the number of spheres to generate and press Enter: " << '\n';
     int num_spheres;
     std::cin >> num_spheres;
 
@@ -89,7 +97,7 @@ int main(int argc, char** argv)
     mk.color.g = 0.5f;
     mk.color.b = 1.0f;
     mk.color.a = 0.3f;
-    mk.lifetime = rclcpp::Duration(lifetime);
+    mk.lifetime = rclcpp::Duration::from_seconds(lifetime);
     visualization_msgs::msg::MarkerArray arr;
     arr.markers.push_back(mk);
     pub_markers->publish(arr);
@@ -112,7 +120,7 @@ int main(int argc, char** argv)
       t.translation() = Eigen::Vector3d(rng.uniformReal(aabb[0], aabb[1]), rng.uniformReal(aabb[2], aabb[3]),
                                         rng.uniformReal(aabb[4], aabb[5]));
       scene->getWorldNonConst()->clearObjects();
-      scene->getWorldNonConst()->addToObject("test", shapes::ShapeConstPtr(new shapes::Sphere(radius)), t);
+      scene->getWorldNonConst()->addToObject("test", std::make_shared<shapes::Sphere>(radius), t);
       collision_detection::CollisionResult res;
       scene->checkCollision(req, res);
       if (res.collision)
@@ -136,7 +144,7 @@ int main(int argc, char** argv)
             mk.pose.orientation.w = 1.0;
             mk.scale.x = mk.scale.y = mk.scale.z = radius;
             mk.color = color;
-            mk.lifetime = rclcpp::Duration(lifetime);
+            mk.lifetime = rclcpp::Duration::from_seconds(lifetime);
             arr.markers.push_back(mk);
             pub_markers->publish(arr);
           }

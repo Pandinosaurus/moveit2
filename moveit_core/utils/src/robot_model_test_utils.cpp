@@ -34,34 +34,68 @@
 
 /* Author: Bryce Willey */
 
-#include "rclcpp/rclcpp.hpp"
-#include <boost/algorithm/string_regex.hpp>
-#include <boost/filesystem.hpp>
-#include <boost/math/constants/constants.hpp>
-#include <geometry_msgs/msg/pose.hpp>
-
-#include <urdf_parser/urdf_parser.h>
-#include <moveit/utils/robot_model_test_utils.h>
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <boost/algorithm/string_regex.hpp>
+#include <filesystem>
+#include <geometry_msgs/msg/pose.hpp>
+#include <moveit/utils/robot_model_test_utils.hpp>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <urdf_parser/urdf_parser.h>
+#include <moveit/utils/logger.hpp>
+
+#include <pluginlib/class_loader.hpp>
+
+#include <moveit/kinematics_base/kinematics_base.hpp>
 
 namespace moveit
 {
 namespace core
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_utils.robot_model_test_utils");
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.core.robot_model_test_utils");
+}
+}  // namespace
+
+moveit::core::RobotModelPtr loadTestingRobotModel(const std::string& package_name,
+                                                  const std::string& urdf_relative_path,
+                                                  const std::string& srdf_relative_path)
+{
+  const auto urdf_path =
+      std::filesystem::path(ament_index_cpp::get_package_share_directory(package_name)) / urdf_relative_path;
+  const auto srdf_path =
+      std::filesystem::path(ament_index_cpp::get_package_share_directory(package_name)) / srdf_relative_path;
+
+  urdf::ModelInterfaceSharedPtr urdf_model = urdf::parseURDFFile(urdf_path.string());
+  if (urdf_model == nullptr)
+  {
+    return nullptr;
+  }
+
+  auto srdf_model = std::make_shared<srdf::Model>();
+  if (!srdf_model->initFile(*urdf_model, srdf_path.string()))
+  {
+    return nullptr;
+  }
+
+  return std::make_shared<moveit::core::RobotModel>(urdf_model, srdf_model);
+}
 
 moveit::core::RobotModelPtr loadTestingRobotModel(const std::string& robot_name)
 {
   urdf::ModelInterfaceSharedPtr urdf = loadModelInterface(robot_name);
   srdf::ModelSharedPtr srdf = loadSRDFModel(robot_name);
-  moveit::core::RobotModelPtr robot_model(new moveit::core::RobotModel(urdf, srdf));
+  auto robot_model = std::make_shared<moveit::core::RobotModel>(urdf, srdf);
   return robot_model;
 }
 
 urdf::ModelInterfaceSharedPtr loadModelInterface(const std::string& robot_name)
 {
   const std::string package_name = "moveit_resources_" + robot_name + "_description";
-  boost::filesystem::path res_path(ament_index_cpp::get_package_share_directory(package_name));
+  std::filesystem::path res_path(ament_index_cpp::get_package_share_directory(package_name));
   std::string urdf_path;
   if (robot_name == "pr2")
   {
@@ -74,7 +108,8 @@ urdf::ModelInterfaceSharedPtr loadModelInterface(const std::string& robot_name)
   urdf::ModelInterfaceSharedPtr urdf_model = urdf::parseURDFFile(urdf_path);
   if (urdf_model == nullptr)
   {
-    RCLCPP_ERROR(LOGGER, "Cannot find URDF for %s. Make sure moveit_resources_<your_robot_description> is installed",
+    RCLCPP_ERROR(getLogger(),
+                 "Cannot find URDF for %s. Make sure moveit_resources_<your_robot_description> is installed",
                  robot_name.c_str());
   }
   return urdf_model;
@@ -83,31 +118,57 @@ urdf::ModelInterfaceSharedPtr loadModelInterface(const std::string& robot_name)
 srdf::ModelSharedPtr loadSRDFModel(const std::string& robot_name)
 {
   urdf::ModelInterfaceSharedPtr urdf_model = loadModelInterface(robot_name);
-  srdf::ModelSharedPtr srdf_model(new srdf::Model());
+  auto srdf_model = std::make_shared<srdf::Model>();
   std::string srdf_path;
   if (robot_name == "pr2")
   {
     const std::string package_name = "moveit_resources_" + robot_name + "_description";
-    boost::filesystem::path res_path(ament_index_cpp::get_package_share_directory(package_name));
+    std::filesystem::path res_path(ament_index_cpp::get_package_share_directory(package_name));
     srdf_path = (res_path / "srdf/robot.xml").string();
   }
   else
   {
     const std::string package_name = "moveit_resources_" + robot_name + "_moveit_config";
-    boost::filesystem::path res_path(ament_index_cpp::get_package_share_directory(package_name));
+    std::filesystem::path res_path(ament_index_cpp::get_package_share_directory(package_name));
     srdf_path = (res_path / "config" / (robot_name + ".srdf")).string();
   }
   srdf_model->initFile(*urdf_model, srdf_path);
   return srdf_model;
 }
 
+void loadIKPluginForGroup(const rclcpp::Node::SharedPtr& node, JointModelGroup* jmg, const std::string& base_link,
+                          const std::string& tip_link, std::string plugin, double timeout)
+{
+  using LoaderType = pluginlib::ClassLoader<kinematics::KinematicsBase>;
+  static std::weak_ptr<LoaderType> cached_loader;
+  std::shared_ptr<LoaderType> loader = cached_loader.lock();
+  if (!loader)
+  {
+    loader = std::make_shared<LoaderType>("moveit_core", "kinematics::KinematicsBase");
+    cached_loader = loader;
+  }
+
+  // translate short to long names
+  if (plugin == "KDL")
+    plugin = "kdl_kinematics_plugin/KDLKinematicsPlugin";
+
+  jmg->setSolverAllocators(
+      [=](const JointModelGroup* jmg) -> kinematics::KinematicsBasePtr {
+        kinematics::KinematicsBasePtr result = loader->createUniqueInstance(plugin);
+        result->initialize(node, jmg->getParentModel(), jmg->getName(), base_link, { tip_link }, 0.0);
+        result->setDefaultTimeout(timeout);
+        return result;
+      },
+      SolverAllocatorMapFn());
+}
+
 RobotModelBuilder::RobotModelBuilder(const std::string& name, const std::string& base_link_name)
-  : urdf_model_(new urdf::ModelInterface()), srdf_writer_(new srdf::SRDFWriter())
+  : urdf_model_(std::make_shared<urdf::ModelInterface>()), srdf_writer_(std::make_shared<srdf::SRDFWriter>())
 {
   urdf_model_->clear();
   urdf_model_->name_ = name;
 
-  urdf::LinkSharedPtr base_link(new urdf::Link);
+  auto base_link = std::make_shared<urdf::Link>();
   base_link->name = base_link_name;
   urdf_model_->links_.insert(std::make_pair(base_link_name, base_link));
 
@@ -121,22 +182,22 @@ void RobotModelBuilder::addChain(const std::string& section, const std::string& 
   boost::split_regex(link_names, section, boost::regex("->"));
   if (link_names.empty())
   {
-    RCLCPP_ERROR(LOGGER, "No links specified (empty section?)");
+    RCLCPP_ERROR(getLogger(), "No links specified (empty section?)");
     is_valid_ = false;
     return;
   }
   // First link should already be added.
   if (!urdf_model_->getLink(link_names[0]))
   {
-    RCLCPP_ERROR(LOGGER, "Link %s not present in builder yet!", link_names[0].c_str());
+    RCLCPP_ERROR(getLogger(), "Link %s not present in builder yet!", link_names[0].c_str());
     is_valid_ = false;
     return;
   }
 
   if (!joint_origins.empty() && link_names.size() - 1 != joint_origins.size())
   {
-    RCLCPP_ERROR(LOGGER, "There should be one more link (%zu) than there are joint origins (%zu)", link_names.size(),
-                 joint_origins.size());
+    RCLCPP_ERROR(getLogger(), "There should be one more link (%zu) than there are joint origins (%zu)",
+                 link_names.size(), joint_origins.size());
     is_valid_ = false;
     return;
   }
@@ -147,14 +208,14 @@ void RobotModelBuilder::addChain(const std::string& section, const std::string& 
     // These links shouldn't be present already.
     if (urdf_model_->getLink(link_names[i]))
     {
-      RCLCPP_ERROR(LOGGER, "Link %s is already specified", link_names[i].c_str());
+      RCLCPP_ERROR(getLogger(), "Link %s is already specified", link_names[i].c_str());
       is_valid_ = false;
       return;
     }
-    urdf::LinkSharedPtr link(new urdf::Link);
+    auto link = std::make_shared<urdf::Link>();
     link->name = link_names[i];
     urdf_model_->links_.insert(std::make_pair(link_names[i], link));
-    urdf::JointSharedPtr joint(new urdf::Joint);
+    auto joint = std::make_shared<urdf::Joint>();
     joint->name = link_names[i - 1] + "-" + link_names[i] + "-joint";
     // Default to Identity transform for origins.
     joint->parent_to_joint_origin_transform.clear();
@@ -169,20 +230,32 @@ void RobotModelBuilder::addChain(const std::string& section, const std::string& 
     joint->parent_link_name = link_names[i - 1];
     joint->child_link_name = link_names[i];
     if (type == "planar")
+    {
       joint->type = urdf::Joint::PLANAR;
+    }
     else if (type == "floating")
+    {
       joint->type = urdf::Joint::FLOATING;
+    }
     else if (type == "revolute")
+    {
       joint->type = urdf::Joint::REVOLUTE;
+    }
     else if (type == "continuous")
+    {
       joint->type = urdf::Joint::CONTINUOUS;
+    }
     else if (type == "prismatic")
+    {
       joint->type = urdf::Joint::PRISMATIC;
+    }
     else if (type == "fixed")
+    {
       joint->type = urdf::Joint::FIXED;
+    }
     else
     {
-      RCLCPP_ERROR(LOGGER, "No such joint type as %s", type.c_str());
+      RCLCPP_ERROR(getLogger(), "No such joint type as %s", type.c_str());
       is_valid_ = false;
       return;
     }
@@ -190,9 +263,9 @@ void RobotModelBuilder::addChain(const std::string& section, const std::string& 
     joint->axis = joint_axis;
     if (joint->type == urdf::Joint::REVOLUTE || joint->type == urdf::Joint::PRISMATIC)
     {
-      urdf::JointLimitsSharedPtr limits(new urdf::JointLimits);
-      limits->lower = -boost::math::constants::pi<double>();
-      limits->upper = boost::math::constants::pi<double>();
+      auto limits = std::make_shared<urdf::JointLimits>();
+      limits->lower = -M_PI;
+      limits->upper = M_PI;
 
       joint->limits = limits;
     }
@@ -205,12 +278,12 @@ void RobotModelBuilder::addInertial(const std::string& link_name, double mass, g
 {
   if (!urdf_model_->getLink(link_name))
   {
-    RCLCPP_ERROR(LOGGER, "Link %s not present in builder yet!", link_name.c_str());
+    RCLCPP_ERROR(getLogger(), "Link %s not present in builder yet!", link_name.c_str());
     is_valid_ = false;
     return;
   }
 
-  urdf::InertialSharedPtr inertial(new urdf::Inertial);
+  auto inertial = std::make_shared<urdf::Inertial>();
   inertial->origin.position = urdf::Vector3(origin.position.x, origin.position.y, origin.position.z);
   inertial->origin.rotation =
       urdf::Rotation(origin.orientation.x, origin.orientation.y, origin.orientation.z, origin.orientation.w);
@@ -230,8 +303,8 @@ void RobotModelBuilder::addInertial(const std::string& link_name, double mass, g
 void RobotModelBuilder::addVisualBox(const std::string& link_name, const std::vector<double>& size,
                                      geometry_msgs::msg::Pose origin)
 {
-  urdf::VisualSharedPtr vis(new urdf::Visual);
-  urdf::BoxSharedPtr geometry(new urdf::Box);
+  auto vis = std::make_shared<urdf::Visual>();
+  auto geometry = std::make_shared<urdf::Box>();
   geometry->dim = urdf::Vector3(size[0], size[1], size[2]);
   vis->geometry = geometry;
   addLinkVisual(link_name, vis, origin);
@@ -242,12 +315,12 @@ void RobotModelBuilder::addCollisionBox(const std::string& link_name, const std:
 {
   if (dims.size() != 3)
   {
-    RCLCPP_ERROR(LOGGER, "There can only be 3 dimensions of a box (given %zu!)");
+    RCLCPP_ERROR(getLogger(), "There can only be 3 dimensions of a box (given %zu!)", dims.size());
     is_valid_ = false;
     return;
   }
-  urdf::CollisionSharedPtr coll(new urdf::Collision);
-  urdf::BoxSharedPtr geometry(new urdf::Box);
+  auto coll = std::make_shared<urdf::Collision>();
+  auto geometry = std::make_shared<urdf::Box>();
   geometry->dim = urdf::Vector3(dims[0], dims[1], dims[2]);
   coll->geometry = geometry;
   addLinkCollision(link_name, coll, origin);
@@ -256,8 +329,8 @@ void RobotModelBuilder::addCollisionBox(const std::string& link_name, const std:
 void RobotModelBuilder::addCollisionMesh(const std::string& link_name, const std::string& filename,
                                          geometry_msgs::msg::Pose origin)
 {
-  urdf::CollisionSharedPtr coll(new urdf::Collision);
-  urdf::MeshSharedPtr geometry(new urdf::Mesh);
+  auto coll = std::make_shared<urdf::Collision>();
+  auto geometry = std::make_shared<urdf::Mesh>();
   geometry->filename = filename;
   coll->geometry = geometry;
   addLinkCollision(link_name, coll, origin);
@@ -268,7 +341,7 @@ void RobotModelBuilder::addLinkCollision(const std::string& link_name, const urd
 {
   if (!urdf_model_->getLink(link_name))
   {
-    RCLCPP_ERROR(LOGGER, "Link %s not present in builder yet!", link_name.c_str());
+    RCLCPP_ERROR(getLogger(), "Link %s not present in builder yet!", link_name.c_str());
     is_valid_ = false;
     return;
   }
@@ -286,7 +359,7 @@ void RobotModelBuilder::addLinkVisual(const std::string& link_name, const urdf::
 {
   if (!urdf_model_->getLink(link_name))
   {
-    RCLCPP_ERROR(LOGGER, "Link %s not present in builder yet!", link_name.c_str());
+    RCLCPP_ERROR(getLogger(), "Link %s not present in builder yet!", link_name.c_str());
     is_valid_ = false;
     return;
   }
@@ -317,9 +390,13 @@ void RobotModelBuilder::addVirtualJoint(const std::string& parent_frame, const s
 {
   srdf::Model::VirtualJoint new_virtual_joint;
   if (name.empty())
+  {
     new_virtual_joint.name_ = parent_frame + "-" + child_link + "-virtual_joint";
+  }
   else
+  {
     new_virtual_joint.name_ = name;
+  }
   new_virtual_joint.type_ = type;
   new_virtual_joint.parent_frame_ = parent_frame;
   new_virtual_joint.child_link_ = child_link;
@@ -330,9 +407,13 @@ void RobotModelBuilder::addGroupChain(const std::string& base_link, const std::s
 {
   srdf::Model::Group new_group;
   if (name.empty())
+  {
     new_group.name_ = base_link + "-" + tip_link + "-chain-group";
+  }
   else
+  {
     new_group.name_ = name;
+  }
   new_group.chains_.push_back(std::make_pair(base_link, tip_link));
   srdf_writer_->groups_.push_back(new_group);
 }
@@ -381,7 +462,7 @@ moveit::core::RobotModelPtr RobotModelBuilder::build()
   }
   catch (urdf::ParseError& e)
   {
-    RCLCPP_ERROR(LOGGER, "Failed to build tree: %s", e.what());
+    RCLCPP_ERROR(getLogger(), "Failed to build tree: %s", e.what());
     return robot_model;
   }
 
@@ -392,11 +473,11 @@ moveit::core::RobotModelPtr RobotModelBuilder::build()
   }
   catch (urdf::ParseError& e)
   {
-    RCLCPP_ERROR(LOGGER, "Failed to find root link: %s", e.what());
+    RCLCPP_ERROR(getLogger(), "Failed to find root link: %s", e.what());
     return robot_model;
   }
   srdf_writer_->updateSRDFModel(*urdf_model_);
-  robot_model.reset(new moveit::core::RobotModel(urdf_model_, srdf_writer_->srdf_model_));
+  robot_model = std::make_shared<moveit::core::RobotModel>(urdf_model_, srdf_writer_->srdf_model_);
   return robot_model;
 }
 }  // namespace core

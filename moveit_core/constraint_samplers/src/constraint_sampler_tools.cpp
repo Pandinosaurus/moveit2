@@ -34,12 +34,24 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/constraint_samplers/constraint_sampler_tools.h>
-#include <moveit/constraint_samplers/constraint_sampler_manager.h>
+#include <moveit/constraint_samplers/constraint_sampler_tools.hpp>
+#include <moveit/constraint_samplers/constraint_sampler_manager.hpp>
+#include <rclcpp/clock.hpp>
+#include <rclcpp/duration.hpp>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <rclcpp/time.hpp>
+#include <moveit/utils/logger.hpp>
 
 namespace constraint_samplers
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_constraint_samplers.constraint_sampler_tools");
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.core.constraint_sampler_tools");
+}
+}  // namespace
 
 void visualizeDistribution(const moveit_msgs::msg::Constraints& constr,
                            const planning_scene::PlanningSceneConstPtr& scene, const std::string& group,
@@ -61,13 +73,13 @@ double countSamplesPerSecond(const ConstraintSamplerPtr& sampler, const moveit::
 {
   if (!sampler)
   {
-    RCLCPP_ERROR(LOGGER, "No sampler specified for counting samples per second");
+    RCLCPP_ERROR(getLogger(), "No sampler specified for counting samples per second");
     return 0.0;
   }
   moveit::core::RobotState ks(reference_state);
   unsigned long int valid = 0;
   unsigned long int total = 0;
-  rclcpp::Time end = rclcpp::Clock().now() + rclcpp::Duration(1.0);
+  rclcpp::Time end = rclcpp::Clock().now() + rclcpp::Duration::from_seconds(1);
   do
   {
     static const unsigned int N = 10;
@@ -78,7 +90,7 @@ double countSamplesPerSecond(const ConstraintSamplerPtr& sampler, const moveit::
         valid++;
     }
   } while (rclcpp::Clock().now() < end);
-  return (double)valid / (double)total;
+  return static_cast<double>(valid) / static_cast<double>(total);
 }
 
 void visualizeDistribution(const ConstraintSamplerPtr& sampler, const moveit::core::RobotState& reference_state,
@@ -87,7 +99,7 @@ void visualizeDistribution(const ConstraintSamplerPtr& sampler, const moveit::co
 {
   if (!sampler)
   {
-    RCLCPP_ERROR(LOGGER, "No sampler specified for visualizing distribution of samples");
+    RCLCPP_ERROR(getLogger(), "No sampler specified for visualizing distribution of samples");
     return;
   }
   const moveit::core::LinkModel* lm = reference_state.getLinkModel(link_name);
@@ -117,7 +129,7 @@ void visualizeDistribution(const ConstraintSamplerPtr& sampler, const moveit::co
     mk.pose.orientation.w = 1.0;
     mk.scale.x = mk.scale.y = mk.scale.z = 0.035;
     mk.color = color;
-    mk.lifetime = rclcpp::Duration(30.0);
+    mk.lifetime = rclcpp::Duration::from_seconds(30);
     markers.markers.push_back(mk);
   }
 }

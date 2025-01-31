@@ -34,22 +34,23 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/robot_model/prismatic_joint_model.h>
+#include <moveit/robot_model/prismatic_joint_model.hpp>
 #include <limits>
 
 namespace moveit
 {
 namespace core
 {
-PrismaticJointModel::PrismaticJointModel(const std::string& name) : JointModel(name), axis_(0.0, 0.0, 0.0)
+PrismaticJointModel::PrismaticJointModel(const std::string& name, size_t joint_index, size_t first_variable_index)
+  : JointModel(name, joint_index, first_variable_index), axis_(0.0, 0.0, 0.0)
 {
   type_ = PRISMATIC;
-  variable_names_.push_back(name_);
+  variable_names_.push_back(getName());
   variable_bounds_.resize(1);
   variable_bounds_[0].position_bounded_ = true;
   variable_bounds_[0].min_position_ = -std::numeric_limits<double>::max();
   variable_bounds_[0].max_position_ = std::numeric_limits<double>::max();
-  variable_index_map_[name_] = 0;
+  variable_index_map_[getName()] = 0;
   computeVariableBoundsMsg();
 }
 
@@ -67,14 +68,18 @@ void PrismaticJointModel::getVariableDefaultPositions(double* values, const Boun
 {
   // if zero is a valid value
   if (bounds[0].min_position_ <= 0.0 && bounds[0].max_position_ >= 0.0)
+  {
     values[0] = 0.0;
+  }
   else
+  {
     values[0] = (bounds[0].min_position_ + bounds[0].max_position_) / 2.0;
+  }
 }
 
 bool PrismaticJointModel::satisfiesPositionBounds(const double* values, const Bounds& bounds, double margin) const
 {
-  return !(values[0] < bounds[0].min_position_ - margin || values[0] > bounds[0].max_position_ + margin);
+  return values[0] >= bounds[0].min_position_ - margin && values[0] <= bounds[0].max_position_ + margin;
 }
 
 void PrismaticJointModel::getVariableRandomPositions(random_numbers::RandomNumberGenerator& rng, double* values,

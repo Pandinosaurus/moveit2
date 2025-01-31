@@ -34,8 +34,8 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/ompl_interface/parameterization/work_space/pose_model_state_space_factory.h>
-#include <moveit/ompl_interface/parameterization/work_space/pose_model_state_space.h>
+#include <moveit/ompl_interface/parameterization/work_space/pose_model_state_space_factory.hpp>
+#include <moveit/ompl_interface/parameterization/work_space/pose_model_state_space.hpp>
 
 ompl_interface::PoseModelStateSpaceFactory::PoseModelStateSpaceFactory() : ModelBasedStateSpaceFactory()
 {
@@ -54,7 +54,9 @@ int ompl_interface::PoseModelStateSpaceFactory::canRepresentProblem(
     bool ik = false;
     // check that we have a direct means to compute IK
     if (slv.first)
+    {
       ik = jmg->getVariableCount() == slv.first.bijection_.size();
+    }
     else if (!slv.second.empty())
     {
       // or an IK solver for each of the subgroups
@@ -75,9 +77,13 @@ int ompl_interface::PoseModelStateSpaceFactory::canRepresentProblem(
       if ((!req.path_constraints.position_constraints.empty() ||
            !req.path_constraints.orientation_constraints.empty()) &&
           req.path_constraints.joint_constraints.empty() && req.path_constraints.visibility_constraints.empty())
+      {
         return 150;
+      }
       else
+      {
         return 50;
+      }
     }
   }
   return -1;

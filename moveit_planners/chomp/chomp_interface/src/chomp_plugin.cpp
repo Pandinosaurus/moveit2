@@ -32,16 +32,26 @@
  *  POSSIBILITY OF SUCH DAMAGE.
  *********************************************************************/
 
-#include <moveit/planning_interface/planning_interface.h>
-#include <moveit/planning_scene/planning_scene.h>
-#include <moveit/robot_model/robot_model.h>
-#include <moveit/collision_distance_field/collision_detector_allocator_hybrid.h>
-#include <chomp_interface/chomp_planning_context.h>
+#include <chomp_interface/chomp_planning_context.hpp>
+#include <moveit/collision_distance_field/collision_detector_allocator_hybrid.hpp>
+#include <moveit/planning_interface/planning_interface.hpp>
+#include <moveit/planning_scene/planning_scene.hpp>
+#include <moveit/robot_model/robot_model.hpp>
+#include <moveit/utils/logger.hpp>
 
 #include <pluginlib/class_list_macros.hpp>
+#include <vector>
 
 namespace chomp_interface
 {
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.planners.chomp.planner_manager");
+}
+}  // namespace
+
 class CHOMPPlannerManager : public planning_interface::PlannerManager
 {
 public:
@@ -49,12 +59,12 @@ public:
   {
   }
 
-  bool initialize(const moveit::core::RobotModelConstPtr& model, const std::string& /*ns*/) override
+  bool initialize(const moveit::core::RobotModelConstPtr& model, const rclcpp::Node::SharedPtr& node,
+                  const std::string& /* unused */) override
   {
     for (const std::string& group : model->getJointModelGroupNames())
     {
-      planning_contexts_[group] =
-          CHOMPPlanningContextPtr(new CHOMPPlanningContext("chomp_planning_context", group, model));
+      planning_contexts_[group] = std::make_shared<CHOMPPlanningContext>("chomp_planning_context", group, model, node);
     }
     return true;
   }
@@ -68,21 +78,21 @@ public:
 
     if (req.group_name.empty())
     {
-      ROS_ERROR("No group specified to plan for");
+      RCLCPP_ERROR(getLogger(), "No group specified to plan for");
       error_code.val = moveit_msgs::msg::MoveItErrorCodes::INVALID_GROUP_NAME;
       return planning_interface::PlanningContextPtr();
     }
 
     if (!planning_scene)
     {
-      ROS_ERROR("No planning scene supplied as input");
+      RCLCPP_ERROR(getLogger(), "No planning scene supplied as input");
       error_code.val = moveit_msgs::msg::MoveItErrorCodes::FAILURE;
       return planning_interface::PlanningContextPtr();
     }
 
     // create PlanningScene using hybrid collision detector
     planning_scene::PlanningScenePtr ps = planning_scene->diff();
-    ps->setActiveCollisionDetector(collision_detection::CollisionDetectorAllocatorHybrid::create(), true);
+    ps->allocateCollisionDetector(collision_detection::CollisionDetectorAllocatorHybrid::create());
 
     // retrieve and configure existing context
     const CHOMPPlanningContextPtr& context = planning_contexts_.at(req.group_name);
@@ -116,4 +126,4 @@ protected:
 
 }  // namespace chomp_interface
 
-PLUGINLIB_EXPORT_CLASS(chomp_interface::CHOMPPlannerManager, planning_interface::PlannerManager);
+PLUGINLIB_EXPORT_CLASS(chomp_interface::CHOMPPlannerManager, planning_interface::PlannerManager)

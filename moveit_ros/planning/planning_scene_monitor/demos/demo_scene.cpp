@@ -34,12 +34,22 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/planning_scene_monitor/planning_scene_monitor.h>
+#include <moveit/planning_scene_monitor/planning_scene_monitor.hpp>
 #include <geometric_shapes/solid_primitive_dims.h>
-
-#include <rclcpp/rclcpp.hpp>
-
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_ros.planning_scene_monitor.demo_scene");
+#include <rclcpp/clock.hpp>
+#include <rclcpp/executors.hpp>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <rclcpp/node.hpp>
+#include <rclcpp/publisher.hpp>
+#include <rclcpp/version.h>
+#if RCLCPP_VERSION_GTE(20, 0, 0)
+#include <rclcpp/event_handler.hpp>
+#else
+#include <rclcpp/qos_event.hpp>
+#endif
+#include <rclcpp/time.hpp>
+#include <rclcpp/utilities.hpp>
 
 static const std::string ROBOT_DESCRIPTION = "robot_description";
 
@@ -65,6 +75,7 @@ void sendKnife(const rclcpp::Node::SharedPtr& node)
   co.id = "knife";
   co.header.stamp = rclcpp::Clock().now();
   co.header.frame_id = aco.link_name;
+  co.pose.orientation.w = 1.0;
   co.operation = moveit_msgs::msg::CollisionObject::ADD;
   co.primitives.resize(1);
   co.primitives[0].type = shape_msgs::msg::SolidPrimitive::BOX;
@@ -80,7 +91,7 @@ void sendKnife(const rclcpp::Node::SharedPtr& node)
   pub_aco->publish(aco);
   rclcpp::sleep_for(1s);
   pub_aco->publish(aco);
-  RCLCPP_INFO(LOGGER, "Object published.");
+  RCLCPP_INFO(node->get_logger(), "Object published.");
   rclcpp::sleep_for(1500ms);
 }
 

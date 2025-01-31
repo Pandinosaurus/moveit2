@@ -35,30 +35,35 @@
 
 /* Author: Ioan Sucan, Dave Coleman */
 
-#include <moveit/robot_state/conversions.h>
+#include <boost/variant.hpp>
+#include <moveit/robot_state/conversions.hpp>
 #include <geometric_shapes/shape_operations.h>
-#include <tf2_eigen/tf2_eigen.h>
-#include <boost/lexical_cast.hpp>
-#include "rclcpp/rclcpp.hpp"
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <tf2_eigen/tf2_eigen.hpp>
+#include <string>
+#include <moveit/utils/logger.hpp>
 
 namespace moveit
 {
 namespace core
 {
+
 // ********************************************
 // * Internal (hidden) functions
 // ********************************************
-
 namespace
 {
-// Logger
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_robot_state.conversions");
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.core.conversions");
+}
 
-static bool _jointStateToRobotState(const sensor_msgs::msg::JointState& joint_state, RobotState& state)
+bool jointStateToRobotStateImpl(const sensor_msgs::msg::JointState& joint_state, RobotState& state)
 {
   if (joint_state.name.size() != joint_state.position.size())
   {
-    RCLCPP_ERROR(LOGGER, "Different number of names and positions in JointState message: %zu, %zu",
+    RCLCPP_ERROR(getLogger(), "Different number of names and positions in JointState message: %zu, %zu",
                  joint_state.name.size(), joint_state.position.size());
     return false;
   }
@@ -68,13 +73,12 @@ static bool _jointStateToRobotState(const sensor_msgs::msg::JointState& joint_st
   return true;
 }
 
-static bool _multiDOFJointsToRobotState(const sensor_msgs::msg::MultiDOFJointState& mjs, RobotState& state,
-                                        const Transforms* tf)
+bool multiDofJointsToRobotState(const sensor_msgs::msg::MultiDOFJointState& mjs, RobotState& state, const Transforms* tf)
 {
   std::size_t nj = mjs.joint_names.size();
   if (nj != mjs.transforms.size())
   {
-    RCLCPP_ERROR(LOGGER, "Different number of names, values or frames in MultiDOFJointState message.");
+    RCLCPP_ERROR(getLogger(), "Different number of names, values or frames in MultiDOFJointState message.");
     return false;
   }
 
@@ -85,6 +89,7 @@ static bool _multiDOFJointsToRobotState(const sensor_msgs::msg::MultiDOFJointSta
   if (nj > 0 && !Transforms::sameFrame(mjs.header.frame_id, state.getRobotModel()->getModelFrame()))
   {
     if (tf)
+    {
       try
       {
         // find the transform that takes the given frame_id to the desired fixed frame
@@ -96,17 +101,22 @@ static bool _multiDOFJointsToRobotState(const sensor_msgs::msg::MultiDOFJointSta
       }
       catch (std::exception& ex)
       {
-        RCLCPP_ERROR(LOGGER, "Caught %s", ex.what());
+        RCLCPP_ERROR(getLogger(), "Caught %s", ex.what());
         error = true;
       }
+    }
     else
+    {
       error = true;
+    }
 
     if (error)
-      RCLCPP_WARN(LOGGER,
+    {
+      RCLCPP_WARN(getLogger(),
                   "The transform for multi-dof joints was specified in frame '%s' "
                   "but it was not possible to transform that to frame '%s'",
                   mjs.header.frame_id.c_str(), state.getRobotModel()->getModelFrame().c_str());
+    }
   }
 
   for (std::size_t i = 0; i < nj; ++i)
@@ -114,7 +124,7 @@ static bool _multiDOFJointsToRobotState(const sensor_msgs::msg::MultiDOFJointSta
     const std::string& joint_name = mjs.joint_names[i];
     if (!state.getRobotModel()->hasJointModel(joint_name))
     {
-      RCLCPP_WARN(LOGGER, "No joint matching multi-dof joint '%s'", joint_name.c_str());
+      RCLCPP_WARN(getLogger(), "No joint matching multi-dof joint '%s'", joint_name.c_str());
       error = true;
       continue;
     }
@@ -129,7 +139,7 @@ static bool _multiDOFJointsToRobotState(const sensor_msgs::msg::MultiDOFJointSta
   return !error;
 }
 
-static inline void _robotStateToMultiDOFJointState(const RobotState& state, sensor_msgs::msg::MultiDOFJointState& mjs)
+void robotStateToMultiDofJointState(const RobotState& state, sensor_msgs::msg::MultiDOFJointState& mjs)
 {
   const std::vector<const JointModel*>& js = state.getRobotModel()->getMultiDOFJointModels();
   mjs.joint_names.clear();
@@ -188,7 +198,7 @@ private:
   const geometry_msgs::msg::Pose* pose_;
 };
 
-static void _attachedBodyToMsg(const AttachedBody& attached_body, moveit_msgs::msg::AttachedCollisionObject& aco)
+void attachedBodyToMsg(const AttachedBody& attached_body, moveit_msgs::msg::AttachedCollisionObject& aco)
 {
   aco.link_name = attached_body.getAttachedLinkName();
   aco.detach_posture = attached_body.getDetachPosture();
@@ -198,10 +208,11 @@ static void _attachedBodyToMsg(const AttachedBody& attached_body, moveit_msgs::m
     aco.touch_links.push_back(touch_link);
   aco.object.header.frame_id = aco.link_name;
   aco.object.id = attached_body.getName();
+  aco.object.pose = tf2::toMsg(attached_body.getPose());
 
   aco.object.operation = moveit_msgs::msg::CollisionObject::ADD;
   const std::vector<shapes::ShapeConstPtr>& ab_shapes = attached_body.getShapes();
-  const EigenSTL::vector_Isometry3d& ab_tf = attached_body.getFixedTransforms();
+  const EigenSTL::vector_Isometry3d& shape_poses = attached_body.getShapePoses();
   ShapeVisitorAddToCollisionObject sv(&aco.object);
   aco.object.primitives.clear();
   aco.object.meshes.clear();
@@ -215,13 +226,13 @@ static void _attachedBodyToMsg(const AttachedBody& attached_body, moveit_msgs::m
     if (shapes::constructMsgFromShape(ab_shapes[j].get(), sm))
     {
       geometry_msgs::msg::Pose p;
-      p = tf2::toMsg(ab_tf[j]);
+      p = tf2::toMsg(shape_poses[j]);
       sv.addToObject(sm, p);
     }
   }
   aco.object.subframe_names.clear();
   aco.object.subframe_poses.clear();
-  for (const auto& frame_pair : attached_body.getSubframeTransforms())
+  for (const auto& frame_pair : attached_body.getSubframes())
   {
     aco.object.subframe_names.push_back(frame_pair.first);
     geometry_msgs::msg::Pose pose;
@@ -230,8 +241,7 @@ static void _attachedBodyToMsg(const AttachedBody& attached_body, moveit_msgs::m
   }
 }
 
-static void _msgToAttachedBody(const Transforms* tf, const moveit_msgs::msg::AttachedCollisionObject& aco,
-                               RobotState& state)
+void msgToAttachedBody(const Transforms* tf, const moveit_msgs::msg::AttachedCollisionObject& aco, RobotState& state)
 {
   if (aco.object.operation == moveit_msgs::msg::CollisionObject::ADD)
   {
@@ -239,69 +249,56 @@ static void _msgToAttachedBody(const Transforms* tf, const moveit_msgs::msg::Att
     {
       if (aco.object.primitives.size() != aco.object.primitive_poses.size())
       {
-        RCLCPP_ERROR(LOGGER, "Number of primitive shapes does not match "
-                             "number of poses in collision object message");
+        RCLCPP_ERROR(getLogger(), "Number of primitive shapes does not match "
+                                  "number of poses in collision object message");
         return;
       }
 
       if (aco.object.meshes.size() != aco.object.mesh_poses.size())
       {
-        RCLCPP_ERROR(LOGGER, "Number of meshes does not match number of poses in collision object message");
+        RCLCPP_ERROR(getLogger(), "Number of meshes does not match number of poses in collision object message");
         return;
       }
 
       if (aco.object.planes.size() != aco.object.plane_poses.size())
       {
-        RCLCPP_ERROR(LOGGER, "Number of planes does not match number of poses in collision object message");
+        RCLCPP_ERROR(getLogger(), "Number of planes does not match number of poses in collision object message");
         return;
       }
 
       if (aco.object.subframe_poses.size() != aco.object.subframe_names.size())
       {
-        RCLCPP_ERROR(LOGGER, "Number of subframe poses does not match number of subframe names in message");
+        RCLCPP_ERROR(getLogger(), "Number of subframe poses does not match number of subframe names in message");
         return;
       }
 
       const LinkModel* lm = state.getLinkModel(aco.link_name);
       if (lm)
       {
+        Eigen::Isometry3d object_pose;
+        tf2::fromMsg(aco.object.pose, object_pose);
+
         std::vector<shapes::ShapeConstPtr> shapes;
-        EigenSTL::vector_Isometry3d poses;
+        EigenSTL::vector_Isometry3d shape_poses;
+        const auto num_shapes = aco.object.primitives.size() + aco.object.meshes.size() + aco.object.planes.size();
+        shapes.reserve(num_shapes);
+        shape_poses.reserve(num_shapes);
+
+        auto append = [&shapes, &shape_poses](shapes::Shape* s, const geometry_msgs::msg::Pose& pose_msg) {
+          if (!s)
+            return;
+          Eigen::Isometry3d pose;
+          tf2::fromMsg(pose_msg, pose);
+          shapes.emplace_back(shapes::ShapeConstPtr(s));
+          shape_poses.emplace_back(std::move(pose));
+        };
 
         for (std::size_t i = 0; i < aco.object.primitives.size(); ++i)
-        {
-          shapes::Shape* s = shapes::constructShapeFromMsg(aco.object.primitives[i]);
-          if (s)
-          {
-            Eigen::Isometry3d p;
-            tf2::fromMsg(aco.object.primitive_poses[i], p);
-            shapes.push_back(shapes::ShapeConstPtr(s));
-            poses.push_back(p);
-          }
-        }
+          append(shapes::constructShapeFromMsg(aco.object.primitives[i]), aco.object.primitive_poses[i]);
         for (std::size_t i = 0; i < aco.object.meshes.size(); ++i)
-        {
-          shapes::Shape* s = shapes::constructShapeFromMsg(aco.object.meshes[i]);
-          if (s)
-          {
-            Eigen::Isometry3d p;
-            tf2::fromMsg(aco.object.mesh_poses[i], p);
-            shapes.push_back(shapes::ShapeConstPtr(s));
-            poses.push_back(p);
-          }
-        }
+          append(shapes::constructShapeFromMsg(aco.object.meshes[i]), aco.object.mesh_poses[i]);
         for (std::size_t i = 0; i < aco.object.planes.size(); ++i)
-        {
-          shapes::Shape* s = shapes::constructShapeFromMsg(aco.object.planes[i]);
-          if (s)
-          {
-            Eigen::Isometry3d p;
-            tf2::fromMsg(aco.object.plane_poses[i], p);
-
-            shapes.push_back(shapes::ShapeConstPtr(s));
-            poses.push_back(p);
-          }
-        }
+          append(shapes::constructShapeFromMsg(aco.object.planes[i]), aco.object.plane_poses[i]);
 
         moveit::core::FixedTransformsMap subframe_poses;
         for (std::size_t i = 0; i < aco.object.subframe_poses.size(); ++i)
@@ -312,76 +309,79 @@ static void _msgToAttachedBody(const Transforms* tf, const moveit_msgs::msg::Att
           subframe_poses[name] = p;
         }
 
-        // Transform shape poses and subframes to link frame
+        // Transform shape pose to link frame
         if (!Transforms::sameFrame(aco.object.header.frame_id, aco.link_name))
         {
           bool frame_found = false;
-          Eigen::Isometry3d t0;
-          t0 = state.getFrameTransform(aco.object.header.frame_id, &frame_found);
+          Eigen::Isometry3d world_to_header_frame;
+          world_to_header_frame = state.getFrameTransform(aco.object.header.frame_id, &frame_found);
           if (!frame_found)
           {
             if (tf && tf->canTransform(aco.object.header.frame_id))
-              t0 = tf->getTransform(aco.object.header.frame_id);
+            {
+              world_to_header_frame = tf->getTransform(aco.object.header.frame_id);
+            }
             else
             {
-              t0.setIdentity();
-              RCLCPP_ERROR(LOGGER,
+              world_to_header_frame.setIdentity();
+              RCLCPP_ERROR(getLogger(),
                            "Cannot properly transform from frame '%s'. "
                            "The pose of the attached body may be incorrect",
                            aco.object.header.frame_id.c_str());
             }
           }
-          Eigen::Isometry3d t = state.getGlobalLinkTransform(lm).inverse() * t0;
-          for (Eigen::Isometry3d& pose : poses)
-            pose = t * pose;
-          for (auto& subframe_pose : subframe_poses)
-            subframe_pose.second = t * subframe_pose.second;
+          object_pose = state.getGlobalLinkTransform(lm).inverse() * world_to_header_frame * object_pose;
         }
 
         if (shapes.empty())
         {
-          RCLCPP_ERROR(LOGGER, "There is no geometry to attach to link '%s' as part of attached body '%s'",
+          RCLCPP_ERROR(getLogger(), "There is no geometry to attach to link '%s' as part of attached body '%s'",
                        aco.link_name.c_str(), aco.object.id.c_str());
         }
         else
         {
           if (state.clearAttachedBody(aco.object.id))
-            RCLCPP_DEBUG(LOGGER,
+          {
+            RCLCPP_DEBUG(getLogger(),
                          "The robot state already had an object named '%s' attached to link '%s'. "
                          "The object was replaced.",
                          aco.object.id.c_str(), aco.link_name.c_str());
-          state.attachBody(aco.object.id, shapes, poses, aco.touch_links, aco.link_name, aco.detach_posture,
-                           subframe_poses);
-          RCLCPP_DEBUG(LOGGER, "Attached object '%s' to link '%s'", aco.object.id.c_str(), aco.link_name.c_str());
+          }
+          state.attachBody(aco.object.id, object_pose, shapes, shape_poses, aco.touch_links, aco.link_name,
+                           aco.detach_posture, subframe_poses);
+          RCLCPP_DEBUG(getLogger(), "Attached object '%s' to link '%s'", aco.object.id.c_str(), aco.link_name.c_str());
         }
       }
     }
     else
-      RCLCPP_ERROR(LOGGER, "The attached body for link '%s' has no geometry", aco.link_name.c_str());
+      RCLCPP_ERROR(getLogger(), "The attached body for link '%s' has no geometry", aco.link_name.c_str());
   }
   else if (aco.object.operation == moveit_msgs::msg::CollisionObject::REMOVE)
   {
     if (!state.clearAttachedBody(aco.object.id))
-      RCLCPP_ERROR(LOGGER, "The attached body '%s' can not be removed because it does not exist", aco.link_name.c_str());
+    {
+      RCLCPP_ERROR(getLogger(), "The attached body '%s' can not be removed because it does not exist",
+                   aco.link_name.c_str());
+    }
   }
   else
-    RCLCPP_ERROR(LOGGER, "Unknown collision object operation: %d", aco.object.operation);
+    RCLCPP_ERROR(getLogger(), "Unknown collision object operation: %d", aco.object.operation);
 }
 
-static bool _robotStateMsgToRobotStateHelper(const Transforms* tf, const moveit_msgs::msg::RobotState& robot_state,
-                                             RobotState& state, bool copy_attached_bodies)
+bool robotStateMsgToRobotStateHelper(const Transforms* tf, const moveit_msgs::msg::RobotState& robot_state,
+                                     RobotState& state, bool copy_attached_bodies)
 {
   bool valid;
   const moveit_msgs::msg::RobotState& rs = robot_state;
 
   if (!rs.is_diff && rs.joint_state.name.empty() && rs.multi_dof_joint_state.joint_names.empty())
   {
-    RCLCPP_ERROR(LOGGER, "Found empty JointState message");
+    RCLCPP_ERROR(getLogger(), "Found empty JointState message");
     return false;
   }
 
-  bool result1 = _jointStateToRobotState(robot_state.joint_state, state);
-  bool result2 = _multiDOFJointsToRobotState(robot_state.multi_dof_joint_state, state, tf);
+  bool result1 = jointStateToRobotStateImpl(robot_state.joint_state, state);
+  bool result2 = multiDofJointsToRobotState(robot_state.multi_dof_joint_state, state, tf);
   valid = result1 || result2;
 
   if (valid && copy_attached_bodies)
@@ -390,7 +390,7 @@ static bool _robotStateMsgToRobotStateHelper(const Transforms* tf, const moveit_
       state.clearAttachedBodies();
     for (const moveit_msgs::msg::AttachedCollisionObject& attached_collision_object :
          robot_state.attached_collision_objects)
-      _msgToAttachedBody(tf, attached_collision_object, state);
+      msgToAttachedBody(tf, attached_collision_object, state);
   }
 
   return valid;
@@ -405,7 +405,7 @@ static bool _robotStateMsgToRobotStateHelper(const Transforms* tf, const moveit_
 
 bool jointStateToRobotState(const sensor_msgs::msg::JointState& joint_state, RobotState& state)
 {
-  bool result = _jointStateToRobotState(joint_state, state);
+  bool result = jointStateToRobotStateImpl(joint_state, state);
   state.update();
   return result;
 }
@@ -413,7 +413,7 @@ bool jointStateToRobotState(const sensor_msgs::msg::JointState& joint_state, Rob
 bool robotStateMsgToRobotState(const moveit_msgs::msg::RobotState& robot_state, RobotState& state,
                                bool copy_attached_bodies)
 {
-  bool result = _robotStateMsgToRobotStateHelper(nullptr, robot_state, state, copy_attached_bodies);
+  bool result = robotStateMsgToRobotStateHelper(nullptr, robot_state, state, copy_attached_bodies);
   state.update();
   return result;
 }
@@ -421,7 +421,7 @@ bool robotStateMsgToRobotState(const moveit_msgs::msg::RobotState& robot_state, 
 bool robotStateMsgToRobotState(const Transforms& tf, const moveit_msgs::msg::RobotState& robot_state, RobotState& state,
                                bool copy_attached_bodies)
 {
-  bool result = _robotStateMsgToRobotStateHelper(&tf, robot_state, state, copy_attached_bodies);
+  bool result = robotStateMsgToRobotStateHelper(&tf, robot_state, state, copy_attached_bodies);
   state.update();
   return result;
 }
@@ -431,7 +431,7 @@ void robotStateToRobotStateMsg(const RobotState& state, moveit_msgs::msg::RobotS
 {
   robot_state.is_diff = false;
   robotStateToJointStateMsg(state, robot_state.joint_state);
-  _robotStateToMultiDOFJointState(state, robot_state.multi_dof_joint_state);
+  robotStateToMultiDofJointState(state, robot_state.multi_dof_joint_state);
 
   if (copy_attached_bodies)
   {
@@ -447,7 +447,7 @@ void attachedBodiesToAttachedCollisionObjectMsgs(
 {
   attached_collision_objs.resize(attached_bodies.size());
   for (std::size_t i = 0; i < attached_bodies.size(); ++i)
-    _attachedBodyToMsg(*attached_bodies[i], attached_collision_objs[i]);
+    attachedBodyToMsg(*attached_bodies[i], attached_collision_objs[i]);
 }
 
 void robotStateToJointStateMsg(const RobotState& state, sensor_msgs::msg::JointState& joint_state)
@@ -475,12 +475,12 @@ bool jointTrajPointToRobotState(const trajectory_msgs::msg::JointTrajectory& tra
 {
   if (trajectory.points.empty() || point_id > trajectory.points.size() - 1)
   {
-    RCLCPP_ERROR(LOGGER, "Invalid point_id");
+    RCLCPP_ERROR(getLogger(), "Invalid point_id");
     return false;
   }
   if (trajectory.joint_names.empty())
   {
-    RCLCPP_ERROR(LOGGER, "No joint names specified");
+    RCLCPP_ERROR(getLogger(), "No joint names specified");
     return false;
   }
 
@@ -508,7 +508,7 @@ void robotStateToStream(const RobotState& state, std::ostream& out, bool include
       if (i < state.getVariableCount() - 1)
         out << separator;
     }
-    out << std::endl;
+    out << '\n';
   }
 
   // Output values of joints
@@ -520,7 +520,7 @@ void robotStateToStream(const RobotState& state, std::ostream& out, bool include
     if (i < state.getVariableCount() - 1)
       out << separator;
   }
-  out << std::endl;
+  out << '\n';
 }
 
 void robotStateToStream(const RobotState& state, std::ostream& out,
@@ -556,8 +556,8 @@ void robotStateToStream(const RobotState& state, std::ostream& out,
 
   // Push all headers and joints to our output stream
   if (include_header)
-    out << headers.str() << std::endl;
-  out << joints.str() << std::endl;
+    out << headers.str() << '\n';
+  out << joints.str() << '\n';
 }
 
 void streamToRobotState(RobotState& state, const std::string& line, const std::string& separator)
@@ -570,8 +570,8 @@ void streamToRobotState(RobotState& state, const std::string& line, const std::s
   {
     // Get a variable
     if (!std::getline(line_stream, cell, separator[0]))
-      RCLCPP_ERROR(LOGGER, "Missing variable ", state.getVariableNames()[i].c_str());
-    state.getVariablePositions()[i] = boost::lexical_cast<double>(cell.c_str());
+      RCLCPP_ERROR(getLogger(), "Missing variable %s", state.getVariableNames()[i].c_str());
+    state.getVariablePositions()[i] = std::stod(cell);
   }
 }
 

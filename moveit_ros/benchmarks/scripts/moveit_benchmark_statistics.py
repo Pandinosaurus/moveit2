@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 ######################################################################
 # Software License Agreement (BSD License)
@@ -49,6 +49,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from math import floor
 from optparse import OptionParser, OptionGroup
+
 
 # Given a text line, split it into tokens (by space) and return the token
 # at the desired index. Additionally, test that some expected tokens exist.
@@ -111,6 +112,9 @@ def readRequiredMultilineValue(filevar):
 
 def readBenchmarkLog(dbname, filenames):
     """Parse benchmark log files and store the parsed data in a sqlite3 database."""
+
+    def isInvalidValue(value):
+        return len(value) == 0 or value in ["nan", "-nan", "inf", "-inf"]
 
     conn = sqlite3.connect(dbname)
     c = conn.cursor()
@@ -313,7 +317,7 @@ def readBenchmarkLog(dbname, filenames):
             runIds = []
             for j in range(numRuns):
                 runValues = [
-                    None if len(x) == 0 or x == "nan" or x == "inf" else x
+                    None if isInvalidValue(x) else x
                     for x in logfile.readline().split("; ")[:-1]
                 ]
                 values = tuple([experimentId, plannerId] + runValues)
@@ -334,7 +338,7 @@ def readBenchmarkLog(dbname, filenames):
                 c.execute("PRAGMA table_info(progress)")
                 columnNames = [col[1] for col in c.fetchall()]
 
-                # read progress properties and add columns as necesary
+                # read progress properties and add columns as necessary
                 numProgressProperties = int(nextLine.split()[0])
                 progressPropertyNames = ["runid"]
                 for i in range(numProgressProperties):
@@ -362,7 +366,7 @@ def readBenchmarkLog(dbname, filenames):
                         values = tuple(
                             [runIds[j]]
                             + [
-                                None if len(x) == 0 or x == "nan" or x == "inf" else x
+                                None if isInvalidValue(x) else x
                                 for x in dataSample.split(",")[:-1]
                             ]
                         )
@@ -458,6 +462,7 @@ def plotAttribute(cur, planners, attribute, typename):
         measurementsPercentage = [sum(m) * 100.0 / len(m) for m in measurements]
         ind = range(len(measurements))
         plt.bar(ind, measurementsPercentage, width)
+
         ### uncommenting this line will remove the term 'kConfigDefault' from the labels for OMPL Solvers.
         ### Fits situations where you need more control in the plot, such as in an academic publication for example
         # labels = [l.replace('kConfigDefault', '') for l in labels]
@@ -779,8 +784,9 @@ if __name__ == "__main__":
     if options.view:
         computeViews(options.dbname)
 
-    if options.plot:
-        plotStatistics(options.dbname, options.plot)
+    # TODO(sjahr): This is currently broken and needs to be fixed
+    # if options.plot:
+    #    plotStatistics(options.dbname, options.plot)
 
     if options.mysqldb:
         saveAsMysql(options.dbname, options.mysqldb)

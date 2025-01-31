@@ -33,7 +33,7 @@
  *********************************************************************/
 
 /* Author: Boston Cleek
-   Desc: move group interace ompl constrained planning capabilities for planning and execution
+   Desc: move group interface ompl constrained planning capabilities for planning and execution
 */
 
 // Testing
@@ -41,16 +41,21 @@
 
 // ROS
 #include <rclcpp/rclcpp.hpp>
+// TODO: Remove conditional include when released to all active distros.
+#if __has_include(<tf2/LinearMath/Quaternion.hpp>)
+#include <tf2/LinearMath/Quaternion.hpp>
+#else
 #include <tf2/LinearMath/Quaternion.h>
-#include <tf2_eigen/tf2_eigen.h>
+#endif
+#include <tf2_eigen/tf2_eigen.hpp>
 
 // MoveIt
-#include <moveit/move_group_interface/move_group_interface.h>
-#include <moveit/planning_scene_interface/planning_scene_interface.h>
-#include <moveit/macros/console_colors.h>
+#include <moveit/move_group_interface/move_group_interface.hpp>
+#include <moveit/planning_scene_interface/planning_scene_interface.hpp>
+#include <moveit/macros/console_colors.hpp>
 #include <moveit_msgs/msg/constraints.hpp>
 
-// acuracy tested for position and orientation
+// accuracy tested for position and orientation
 static const double EPSILON = 1e-2;
 
 static const std::string PLANNING_GROUP = "panda_arm";
@@ -76,7 +81,7 @@ public:
     ee_link_ = move_group_->getEndEffectorLink();
 
     executor_->add_node(node_);
-    executor_thread_ = std::thread([this]() { this->executor_->spin(); });
+    executor_thread_ = std::thread([this]() { executor_->spin(); });
   }
 
   ConstrainedPlanningTestFixture()
@@ -103,8 +108,8 @@ public:
     move_group_->setPathConstraints(path_constraint);
 
     moveit::planning_interface::MoveGroupInterface::Plan plan;
-    ASSERT_EQ(move_group_->plan(plan), moveit::planning_interface::MoveItErrorCode::SUCCESS);
-    ASSERT_EQ(move_group_->move(), moveit::planning_interface::MoveItErrorCode::SUCCESS);
+    ASSERT_EQ(move_group_->plan(plan), moveit::core::MoveItErrorCode::SUCCESS);
+    ASSERT_EQ(move_group_->move(), moveit::core::MoveItErrorCode::SUCCESS);
   }
 
   void testPose(const geometry_msgs::msg::PoseStamped& pose_goal_stamped)

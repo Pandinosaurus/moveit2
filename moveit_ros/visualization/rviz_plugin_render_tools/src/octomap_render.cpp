@@ -34,7 +34,7 @@
 
 /* Author: Julius Kammerl */
 
-#include <moveit/rviz_plugin_render_tools/octomap_render.h>
+#include <moveit/rviz_plugin_render_tools/octomap_render.hpp>
 
 #include <octomap_msgs/msg/octomap.hpp>
 #include <octomap/octomap.h>
@@ -58,7 +58,7 @@ OcTreeRender::OcTreeRender(const std::shared_ptr<const octomap::OcTree>& octree,
   }
   else
   {
-    octree_depth_ = std::min(max_octree_depth, (std::size_t)octree->getTreeDepth());
+    octree_depth_ = std::min(max_octree_depth, static_cast<std::size_t>(octree->getTreeDepth()));
   }
 
   scene_node_ = parent_node->createChildSceneNode();
@@ -159,7 +159,6 @@ void OcTreeRender::octreeDecoding(const std::shared_ptr<const octomap::OcTree>& 
 
   unsigned int render_mode_mask = static_cast<unsigned int>(octree_voxel_rendering);
 
-  size_t point_count = 0;
   {
     int step_size = 1 << (octree->getTreeDepth() - octree_depth_);  // for pruning of occluded voxels
 
@@ -169,7 +168,7 @@ void OcTreeRender::octreeDecoding(const std::shared_ptr<const octomap::OcTree>& 
       bool display_voxel = false;
 
       // the left part evaluates to 1 for free voxels and 2 for occupied voxels
-      if (((int)octree->isNodeOccupied(*it) + 1) & render_mode_mask)
+      if ((static_cast<int>(octree->isNodeOccupied(*it)) + 1) & render_mode_mask)
       {
         // check if current voxel has neighbors on all sides -> no need to be displayed
         bool all_neighbors_found = true;
@@ -203,7 +202,7 @@ void OcTreeRender::octreeDecoding(const std::shared_ptr<const octomap::OcTree>& 
                 octomap::OcTreeNode* node = octree->search(key, octree_depth_);
 
                 // the left part evaluates to 1 for free voxels and 2 for occupied voxels
-                if (!(node && ((((int)octree->isNodeOccupied(node)) + 1) & render_mode_mask)))
+                if (!(node && (((static_cast<int>(octree->isNodeOccupied(node))) + 1) & render_mode_mask)))
                 {
                   // we do not have a neighbor => break!
                   all_neighbors_found = false;
@@ -224,7 +223,7 @@ void OcTreeRender::octreeDecoding(const std::shared_ptr<const octomap::OcTree>& 
         new_point.position.y = it.getY();
         new_point.position.z = it.getZ();
 
-        float cell_probability;
+        double cell_probability;
 
         switch (octree_color_mode)
         {
@@ -242,8 +241,6 @@ void OcTreeRender::octreeDecoding(const std::shared_ptr<const octomap::OcTree>& 
         // push to point vectors
         unsigned int depth = it.getDepth();
         point_buf[depth - 1].push_back(new_point);
-
-        ++point_count;
       }
     }
   }

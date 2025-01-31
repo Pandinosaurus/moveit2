@@ -34,20 +34,23 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/constraint_sampler_manager_loader/constraint_sampler_manager_loader.h>
+#include <moveit/constraint_sampler_manager_loader/constraint_sampler_manager_loader.hpp>
 #include <pluginlib/class_loader.hpp>
-#include "rclcpp/rclcpp.hpp"
 #include <boost/tokenizer.hpp>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <rclcpp/parameter_value.hpp>
 #include <memory>
+#include <moveit/utils/logger.hpp>
 
 namespace constraint_sampler_manager_loader
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_ros.constraint_sampler_manager_loader");
 
 class ConstraintSamplerManagerLoader::Helper
 {
 public:
-  Helper(const rclcpp::Node::SharedPtr& node, const constraint_samplers::ConstraintSamplerManagerPtr& csm) : node_(node)
+  Helper(const rclcpp::Node::SharedPtr& node, const constraint_samplers::ConstraintSamplerManagerPtr& csm)
+    : node_(node), logger_(moveit::getLogger("moveit.ros.constraint_sampler_manager_loader"))
   {
     if (node_->has_parameter("constraint_samplers"))
     {
@@ -55,29 +58,30 @@ public:
       node_->get_parameter("constraint_samplers", constraint_samplers);
       try
       {
-        constraint_sampler_plugin_loader_.reset(
-            new pluginlib::ClassLoader<constraint_samplers::ConstraintSamplerAllocator>(
-                "moveit_core", "constraint_samplers::ConstraintSamplerAllocator"));
+        constraint_sampler_plugin_loader_ =
+            std::make_unique<pluginlib::ClassLoader<constraint_samplers::ConstraintSamplerAllocator>>(
+                "moveit_core", "constraint_samplers::ConstraintSamplerAllocator");
       }
       catch (pluginlib::PluginlibException& ex)
       {
-        RCLCPP_ERROR(LOGGER, "Exception while creating constraint sampling plugin loader %s", ex.what());
+        RCLCPP_ERROR(logger_, "Exception while creating constraint sampling plugin loader %s", ex.what());
         return;
       }
       boost::char_separator<char> sep(" ");
-      boost::tokenizer<boost::char_separator<char> > tok(constraint_samplers, sep);
-      for (boost::tokenizer<boost::char_separator<char> >::iterator beg = tok.begin(); beg != tok.end(); ++beg)
+      boost::tokenizer<boost::char_separator<char>> tok(constraint_samplers, sep);
+      for (boost::tokenizer<boost::char_separator<char>>::iterator beg = tok.begin(); beg != tok.end(); ++beg)
       {
         try
         {
           constraint_samplers::ConstraintSamplerAllocatorPtr csa =
               constraint_sampler_plugin_loader_->createUniqueInstance(*beg);
           csm->registerSamplerAllocator(csa);
-          RCLCPP_INFO(LOGGER, "Loaded constraint sampling plugin %s", std::string(*beg).c_str());
+          RCLCPP_INFO(logger_, "Loaded constraint sampling plugin %s", std::string(*beg).c_str());
         }
         catch (pluginlib::PluginlibException& ex)
         {
-          RCLCPP_ERROR(LOGGER, "Exception while planning adapter plugin '%s': %s", std::string(*beg).c_str(), ex.what());
+          RCLCPP_ERROR(logger_, "Exception while planning adapter plugin '%s': %s", std::string(*beg).c_str(),
+                       ex.what());
         }
       }
     }
@@ -85,15 +89,14 @@ public:
 
 private:
   const rclcpp::Node::SharedPtr node_;
-  std::unique_ptr<pluginlib::ClassLoader<constraint_samplers::ConstraintSamplerAllocator> >
+  std::unique_ptr<pluginlib::ClassLoader<constraint_samplers::ConstraintSamplerAllocator>>
       constraint_sampler_plugin_loader_;
+  rclcpp::Logger logger_;
 };
 ConstraintSamplerManagerLoader::ConstraintSamplerManagerLoader(
     const rclcpp::Node::SharedPtr& node, const constraint_samplers::ConstraintSamplerManagerPtr& csm)
-  : constraint_sampler_manager_(
-        csm ? csm :
-              constraint_samplers::ConstraintSamplerManagerPtr(new constraint_samplers::ConstraintSamplerManager()))
-  , impl_(new Helper(node, constraint_sampler_manager_))
+  : constraint_sampler_manager_(csm ? csm : std::make_shared<constraint_samplers::ConstraintSamplerManager>())
+  , impl_(std::make_shared<Helper>(node, constraint_sampler_manager_))
 {
 }
 }  // namespace constraint_sampler_manager_loader

@@ -34,8 +34,8 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/rviz_plugin_render_tools/render_shapes.h>
-#include <moveit/rviz_plugin_render_tools/octomap_render.h>
+#include <moveit/rviz_plugin_render_tools/render_shapes.hpp>
+#include <moveit/rviz_plugin_render_tools/octomap_render.hpp>
 #include <geometric_shapes/check_isometry.h>
 #include <geometric_shapes/mesh_operations.h>
 
@@ -48,10 +48,9 @@
 #include <rviz_common/display_context.hpp>
 #include <rviz_default_plugins/robot/robot.hpp>
 
-#include <boost/lexical_cast.hpp>
-#include <boost/math/constants/constants.hpp>
-
+#include <math.h>
 #include <memory>
+#include <string>
 
 namespace moveit_rviz_plugin
 {
@@ -72,7 +71,7 @@ void RenderShapes::clear()
 
 void RenderShapes::renderShape(Ogre::SceneNode* node, const shapes::Shape* s, const Eigen::Isometry3d& p,
                                OctreeVoxelRenderMode octree_voxel_rendering, OctreeVoxelColorMode octree_color_mode,
-                               const Ogre::ColourValue& color, float alpha)
+                               const Ogre::ColourValue& color, double alpha)
 {
   rviz_rendering::Shape* ogre_shape = nullptr;
   Eigen::Vector3d translation = p.translation();
@@ -144,9 +143,13 @@ void RenderShapes::renderShape(Ogre::SceneNode* node, const shapes::Shape* s, co
               m->addVertex(v, n);
             }
             else if (mesh->triangle_normals)
+            {
               m->addVertex(v, normal);
+            }
             else
+            {
               m->addVertex(v);
+            }
           }
         }
         m->endTriangles();
@@ -156,11 +159,14 @@ void RenderShapes::renderShape(Ogre::SceneNode* node, const shapes::Shape* s, co
 
     case shapes::OCTREE:
     {
-      OcTreeRenderPtr octree(new OcTreeRender(static_cast<const shapes::OcTree*>(s)->octree, octree_voxel_rendering,
-                                              octree_color_mode, 0u, node));
-      octree->setPosition(position);
-      octree->setOrientation(orientation);
-      octree_voxel_grids_.push_back(octree);
+      if (octree_voxel_rendering != OCTOMAP_DISABLED)
+      {
+        auto octree = std::make_shared<moveit_rviz_plugin::OcTreeRender>(
+            static_cast<const shapes::OcTree*>(s)->octree, octree_voxel_rendering, octree_color_mode, 0u, node);
+        octree->setPosition(position);
+        octree->setOrientation(orientation);
+        octree_voxel_grids_.push_back(octree);
+      }
     }
     break;
 
@@ -176,8 +182,7 @@ void RenderShapes::renderShape(Ogre::SceneNode* node, const shapes::Shape* s, co
     {
       // in geometric shapes, the z axis of the cylinder is its height;
       // for the rviz shape, the y axis is the height; we add a transform to fix this
-      static Ogre::Quaternion fix(Ogre::Radian(boost::math::constants::pi<double>() / 2.0),
-                                  Ogre::Vector3(1.0, 0.0, 0.0));
+      static Ogre::Quaternion fix(Ogre::Radian(M_PI / 2.0), Ogre::Vector3(1.0, 0.0, 0.0));
       orientation = orientation * fix;
     }
 
@@ -187,7 +192,7 @@ void RenderShapes::renderShape(Ogre::SceneNode* node, const shapes::Shape* s, co
   }
 }
 
-void RenderShapes::updateShapeColors(float r, float g, float b, float a)
+void RenderShapes::updateShapeColors(double r, double g, double b, double a)
 {
   for (const std::unique_ptr<rviz_rendering::Shape>& shape : scene_shapes_)
     shape->setColor(r, g, b, a);

@@ -39,22 +39,22 @@
 #include <OpenGL/glu.h>
 #else
 #include <GL/glu.h>
-#endif
 #include <GL/glut.h>
+#endif
 #include <GL/freeglut.h>
-#include <moveit/mesh_filter/gl_renderer.h>
+#include <moveit/mesh_filter/gl_renderer.hpp>
+#include <moveit/utils/logger.hpp>
 #include <sstream>
 #include <fstream>
 #include <stdexcept>
 #include <vector>
-#include <boost/thread.hpp>
-#include <rclcpp/rclcpp.hpp>
+#include <thread>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
 
 using namespace std;
 
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit.ros.perception.gl_renderer");
-
-mesh_filter::GLRenderer::GLRenderer(unsigned width, unsigned height, float near, float far)
+mesh_filter::GLRenderer::GLRenderer(unsigned width, unsigned height, double near, double far)
   : width_(width)
   , height_(height)
   , fbo_id_(0)
@@ -91,7 +91,7 @@ void mesh_filter::GLRenderer::setBufferSize(unsigned width, unsigned height)
   }
 }
 
-void mesh_filter::GLRenderer::setClippingRange(float near, float far)
+void mesh_filter::GLRenderer::setClippingRange(double near, double far)
 {
   if (near_ <= 0)
     throw runtime_error("near clipping plane distance needs to be larger than 0");
@@ -101,7 +101,7 @@ void mesh_filter::GLRenderer::setClippingRange(float near, float far)
   far_ = far;
 }
 
-void mesh_filter::GLRenderer::setCameraParameters(float fx, float fy, float cx, float cy)
+void mesh_filter::GLRenderer::setCameraParameters(double fx, double fy, double cx, double cy)
 {
   fx_ = fx;
   fy_ = fy;
@@ -111,10 +111,10 @@ void mesh_filter::GLRenderer::setCameraParameters(float fx, float fy, float cx, 
 
 void mesh_filter::GLRenderer::setCameraParameters() const
 {
-  float left = near_ * -cx_ / fx_;
-  float right = near_ * (width_ - cx_) / fx_;
-  float top = near_ * cy_ / fy_;
-  float bottom = near_ * (cy_ - height_) / fy_;
+  double left = near_ * -cx_ / fx_;
+  double right = near_ * (width_ - cx_) / fx_;
+  double top = near_ * cy_ / fy_;
+  double bottom = near_ * (cy_ - height_) / fy_;
 
   glMatrixMode(GL_PROJECTION);
   glLoadIdentity();
@@ -245,12 +245,12 @@ const GLuint& mesh_filter::GLRenderer::getProgramID() const
   return program_;
 }
 
-const float& mesh_filter::GLRenderer::getNearClippingDistance() const
+const double& mesh_filter::GLRenderer::getNearClippingDistance() const
 {
   return near_;
 }
 
-const float& mesh_filter::GLRenderer::getFarClippingDistance() const
+const double& mesh_filter::GLRenderer::getFarClippingDistance() const
 {
   return far_;
 }
@@ -260,7 +260,7 @@ GLuint mesh_filter::GLRenderer::createShader(GLuint shaderType, const string& Sh
   GLuint shader_id = glCreateShader(shaderType);
 
   // Compile Shader
-  char const* source_pointer = ShaderCode.c_str();
+  const char* source_pointer = ShaderCode.c_str();
   glShaderSource(shader_id, 1, &source_pointer, nullptr);
   glCompileShader(shader_id);
 
@@ -276,7 +276,7 @@ GLuint mesh_filter::GLRenderer::createShader(GLuint shaderType, const string& Sh
       vector<char> shader_error_message(info_log_length + 1);
       glGetShaderInfoLog(shader_id, info_log_length, nullptr, &shader_error_message[0]);
       stringstream error_stream;
-      error_stream << "Could not compile shader: " << (const char*)&shader_error_message[0];
+      error_stream << "Could not compile shader: " << const_cast<const char*>(&shader_error_message[0]);
 
       glDeleteShader(shader_id);
       throw runtime_error(error_stream.str());
@@ -288,7 +288,9 @@ GLuint mesh_filter::GLRenderer::createShader(GLuint shaderType, const string& Sh
 void mesh_filter::GLRenderer::readShaderCodeFromFile(const string& filename, string& shader) const
 {
   if (filename.empty())
+  {
     shader = "";
+  }
   else
   {
     string shader_code;
@@ -302,7 +304,7 @@ void mesh_filter::GLRenderer::readShaderCodeFromFile(const string& filename, str
     else
     {
       stringstream error_stream;
-      error_stream << "Could not open shader code in file \"" << filename << "\"";
+      error_stream << "Could not open shader code in file \"" << filename << '\"';
       throw runtime_error(error_stream.str());
     }
   }
@@ -342,7 +344,7 @@ GLuint mesh_filter::GLRenderer::loadShaders(const string& vertex_source, const s
     glGetProgramInfoLog(program_id, info_log_length, nullptr, &program_error_message[0]);
     std::size_t l = strnlen(&program_error_message[0], program_error_message.size());
     if (l > 0)
-      RCLCPP_ERROR(LOGGER, "%s\n", &program_error_message[0]);
+      RCLCPP_ERROR(moveit::getLogger("moveit.ros.gl_renderer"), "%s\n", &program_error_message[0]);
   }
 
   if (vertex_shader_id)
@@ -354,9 +356,9 @@ GLuint mesh_filter::GLRenderer::loadShaders(const string& vertex_source, const s
   return program_id;
 }
 
-map<boost::thread::id, pair<unsigned, GLuint> > mesh_filter::GLRenderer::context_;
-boost::mutex mesh_filter::GLRenderer::context_lock_;
-bool mesh_filter::GLRenderer::glutInitialized_ = false;
+map<std::thread::id, pair<unsigned, GLuint> > mesh_filter::GLRenderer::s_context;
+std::mutex mesh_filter::GLRenderer::s_context_lock;
+bool mesh_filter::GLRenderer::s_glut_initialized = false;
 
 namespace
 {
@@ -367,8 +369,8 @@ void nullDisplayFunction()
 
 void mesh_filter::GLRenderer::createGLContext()
 {
-  boost::mutex::scoped_lock _(context_lock_);
-  if (!glutInitialized_)
+  std::unique_lock<std::mutex> _(s_context_lock);
+  if (!s_glut_initialized)
   {
     char buffer[1];
     char* args = buffer;
@@ -376,16 +378,16 @@ void mesh_filter::GLRenderer::createGLContext()
 
     glutInit(&n, &args);
     glutInitDisplayMode(GLUT_SINGLE | GLUT_RGB | GLUT_DEPTH);
-    glutInitialized_ = true;
+    s_glut_initialized = true;
   }
 
   // check if our thread is initialized
-  boost::thread::id thread_id = boost::this_thread::get_id();
-  map<boost::thread::id, pair<unsigned, GLuint> >::iterator context_it = context_.find(thread_id);
+  std::thread::id thread_id = std::this_thread::get_id();
+  map<std::thread::id, pair<unsigned, GLuint> >::iterator context_it = s_context.find(thread_id);
 
-  if (context_it == context_.end())
+  if (context_it == s_context.end())
   {
-    context_[thread_id] = std::pair<unsigned, GLuint>(1, 0);
+    s_context.insert({ thread_id, std::pair<unsigned, GLuint>(1, 0) });
 
     glutInitWindowPosition(glutGet(GLUT_SCREEN_WIDTH) + 30000, 0);
     glutInitWindowSize(1, 1);
@@ -406,7 +408,7 @@ void mesh_filter::GLRenderer::createGLContext()
     for (int i = 0; i < 10; ++i)
       glutMainLoopEvent();
 
-    context_[thread_id] = std::pair<unsigned, GLuint>(1, window_id);
+    s_context.at(thread_id) = std::pair<unsigned, GLuint>(1, window_id);
   }
   else
     ++(context_it->second.first);
@@ -414,10 +416,10 @@ void mesh_filter::GLRenderer::createGLContext()
 
 void mesh_filter::GLRenderer::deleteGLContext()
 {
-  boost::mutex::scoped_lock _(context_lock_);
-  boost::thread::id thread_id = boost::this_thread::get_id();
-  map<boost::thread::id, pair<unsigned, GLuint> >::iterator context_it = context_.find(thread_id);
-  if (context_it == context_.end())
+  std::unique_lock<std::mutex> _(s_context_lock);
+  std::thread::id thread_id = std::this_thread::get_id();
+  map<std::thread::id, pair<unsigned, GLuint> >::iterator context_it = s_context.find(thread_id);
+  if (context_it == s_context.end())
   {
     stringstream error_msg;
     error_msg << "No OpenGL context exists for Thread " << thread_id;
@@ -427,7 +429,7 @@ void mesh_filter::GLRenderer::deleteGLContext()
   if (--(context_it->second.first) == 0)
   {
     glutDestroyWindow(context_it->second.second);
-    context_.erase(context_it);
+    s_context.erase(context_it);
   }
 }
 

@@ -32,13 +32,13 @@
  *  POSSIBILITY OF SUCH DAMAGE.
  *********************************************************************/
 
-#include <moveit/robot_model/robot_model.h>
-#include <moveit/robot_model_loader/robot_model_loader.h>
+#include <moveit/robot_model/robot_model.hpp>
+#include <moveit/robot_model_loader/robot_model_loader.hpp>
 
-#include "pilz_industrial_motion_planner/joint_limits_extension.h"
-#include "pilz_industrial_motion_planner/joint_limits_interface_extension.h"
+#include <pilz_industrial_motion_planner/joint_limits_extension.hpp>
+#include <pilz_industrial_motion_planner/joint_limits_interface_extension.hpp>
 
-#include "pilz_industrial_motion_planner/joint_limits_validator.h"
+#include <pilz_industrial_motion_planner/joint_limits_validator.hpp>
 
 bool pilz_industrial_motion_planner::JointLimitsValidator::validateAllPositionLimitsEqual(
     const pilz_industrial_motion_planner::JointLimitsContainer& joint_limits)
@@ -74,7 +74,7 @@ bool pilz_industrial_motion_planner::JointLimitsValidator::validateWithEqualFunc
     return true;
   }
 
-  JointLimit reference = joint_limits.begin()->second;
+  pilz_industrial_motion_planner::JointLimit reference = joint_limits.begin()->second;
 
   for (auto it = std::next(joint_limits.begin()); it != joint_limits.end(); ++it)
   {

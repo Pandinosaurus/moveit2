@@ -32,7 +32,7 @@
  *  POSSIBILITY OF SUCH DAMAGE.
  *********************************************************************/
 
-#include "pilz_industrial_motion_planner/velocity_profile_atrap.h"
+#include <pilz_industrial_motion_planner/velocity_profile_atrap.hpp>
 
 namespace pilz_industrial_motion_planner
 {
@@ -217,7 +217,7 @@ bool VelocityProfileATrap::setProfileStartVelocity(double pos1, double pos2, dou
 
   if (s * vel1 <= 0)
   {
-    // TODO initial velocity is in opposite derection of start-end vector
+    // TODO initial velocity is in opposite direction of start-end vector
     return false;
   }
 
@@ -384,7 +384,7 @@ double VelocityProfileATrap::Acc(double time) const
 KDL::VelocityProfile* VelocityProfileATrap::Clone() const
 {
   VelocityProfileATrap* trap = new VelocityProfileATrap(max_vel_, max_acc_, max_dec_);
-  trap->setProfileAllDurations(this->start_pos_, this->end_pos_, this->t_a_, this->t_b_, this->t_c_);
+  trap->setProfileAllDurations(start_pos_, end_pos_, t_a_, t_b_, t_c_);
   return trap;
 }
 
@@ -396,25 +396,25 @@ void VelocityProfileATrap::Write(std::ostream& os) const
 
 std::ostream& operator<<(std::ostream& os, const VelocityProfileATrap& p)
 {
-  os << "Asymmetric Trapezoid " << std::endl
-     << "maximal velocity: " << p.max_vel_ << std::endl
-     << "maximal acceleration: " << p.max_acc_ << std::endl
-     << "maximal deceleration: " << p.max_dec_ << std::endl
-     << "start position: " << p.start_pos_ << std::endl
-     << "end position: " << p.end_pos_ << std::endl
-     << "start velocity: " << p.start_vel_ << std::endl
-     << "a1: " << p.a1_ << std::endl
-     << "a2: " << p.a2_ << std::endl
-     << "a3: " << p.a3_ << std::endl
-     << "b1: " << p.b1_ << std::endl
-     << "b2: " << p.b2_ << std::endl
-     << "b3: " << p.b3_ << std::endl
-     << "c1: " << p.c1_ << std::endl
-     << "c2: " << p.c2_ << std::endl
-     << "c3: " << p.c3_ << std::endl
-     << "firstPhaseDuration " << p.firstPhaseDuration() << std::endl
-     << "secondPhaseDuration " << p.secondPhaseDuration() << std::endl
-     << "thirdPhaseDuration " << p.thirdPhaseDuration() << std::endl;
+  os << "Asymmetric Trapezoid " << '\n'
+     << "maximal velocity: " << p.max_vel_ << '\n'
+     << "maximal acceleration: " << p.max_acc_ << '\n'
+     << "maximal deceleration: " << p.max_dec_ << '\n'
+     << "start position: " << p.start_pos_ << '\n'
+     << "end position: " << p.end_pos_ << '\n'
+     << "start velocity: " << p.start_vel_ << '\n'
+     << "a1: " << p.a1_ << '\n'
+     << "a2: " << p.a2_ << '\n'
+     << "a3: " << p.a3_ << '\n'
+     << "b1: " << p.b1_ << '\n'
+     << "b2: " << p.b2_ << '\n'
+     << "b3: " << p.b3_ << '\n'
+     << "c1: " << p.c1_ << '\n'
+     << "c2: " << p.c2_ << '\n'
+     << "c3: " << p.c3_ << '\n'
+     << "firstPhaseDuration " << p.firstPhaseDuration() << '\n'
+     << "secondPhaseDuration " << p.secondPhaseDuration() << '\n'
+     << "thirdPhaseDuration " << p.thirdPhaseDuration() << '\n';
   return os;
 }
 // LCOV_EXCL_STOP

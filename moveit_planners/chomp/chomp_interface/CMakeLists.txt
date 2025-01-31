@@ -1,72 +1,49 @@
-cmake_minimum_required(VERSION 3.1.3)
-project(moveit_planners_chomp)
+cmake_minimum_required(VERSION 3.22)
+project(moveit_planners_chomp LANGUAGES CXX)
 
-if(NOT "${CMAKE_CXX_STANDARD}")
-  set(CMAKE_CXX_STANDARD 14)
-endif()
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+# Common cmake code applied to all moveit packages
+find_package(moveit_common REQUIRED)
+moveit_package()
 
-# find catkin in isolation so that CATKIN_ENABLE_TESTING is defined
-find_package(catkin REQUIRED)
-if(CATKIN_ENABLE_TESTING)
-  set(CHOMP_TEST_DEPS moveit_ros_planning_interface)
-else()
-  set(CHOMP_TEST_DEPS)
-endif()
+# find dependencies
+find_package(ament_cmake REQUIRED)
+find_package(moveit_core REQUIRED)
+find_package(chomp_motion_planner REQUIRED)
+find_package(pluginlib REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rsl REQUIRED)
 
-find_package(catkin REQUIRED COMPONENTS
-  roscpp
-  moveit_core
-  pluginlib
-  chomp_motion_planner
-  ${CHOMP_TEST_DEPS}
-)
-
-find_package(Eigen3 REQUIRED)
-find_package(Boost REQUIRED)
-
-catkin_package(
-  INCLUDE_DIRS include
-  LIBRARIES ${PROJECT_NAME}
-  CATKIN_DEPENDS roscpp moveit_core pluginlib
-)
+set(THIS_PACKAGE_INCLUDE_DEPENDS moveit_core chomp_motion_planner moveit_core
+                                 pluginlib rclcpp rsl)
 
 include_directories(include)
-include_directories(SYSTEM
-  ${catkin_INCLUDE_DIRS}
-  ${Boost_INCLUDE_DIRS}
-  ${EIGEN3_INCLUDE_DIRS}
-)
 
-add_library(${PROJECT_NAME} src/chomp_interface.cpp src/chomp_planning_context.cpp)
-set_target_properties(${PROJECT_NAME} PROPERTIES VERSION "${${PROJECT_NAME}_VERSION}")
-target_link_libraries(${PROJECT_NAME} ${catkin_LIBRARIES})
+add_library(moveit_chomp_interface SHARED src/chomp_interface.cpp
+                                          src/chomp_planning_context.cpp)
+set_target_properties(moveit_chomp_interface
+                      PROPERTIES VERSION "${moveit_planners_chomp_VERSION}")
+ament_target_dependencies(moveit_chomp_interface
+                          ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
-add_library(chomp_planner_plugin src/chomp_plugin.cpp)
-set_target_properties(chomp_planner_plugin PROPERTIES VERSION "${${PROJECT_NAME}_VERSION}")
-target_link_libraries(chomp_planner_plugin ${PROJECT_NAME} ${catkin_LIBRARIES})
+add_library(moveit_chomp_planner_plugin SHARED src/chomp_plugin.cpp)
+ament_target_dependencies(moveit_chomp_planner_plugin
+                          ${THIS_PACKAGE_INCLUDE_DEPENDS})
+target_link_libraries(moveit_chomp_planner_plugin moveit_chomp_interface)
 
-install(FILES chomp_interface_plugin_description.xml
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
+install(
+  TARGETS moveit_chomp_interface moveit_chomp_planner_plugin
+  EXPORT moveit_planners_chompTargets
+  LIBRARY DESTINATION lib
+  ARCHIVE DESTINATION lib
+  RUNTIME DESTINATION bin)
 
-install(DIRECTORY include/chomp_interface/
-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
-)
+ament_export_targets(moveit_planners_chompTargets HAS_LIBRARY_TARGET)
+ament_export_dependencies(${THIS_PACKAGE_INCLUDE_DEPENDS})
 
-install(TARGETS ${PROJECT_NAME} chomp_planner_plugin
-  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION}
-)
+pluginlib_export_plugin_description_file(moveit_core
+                                         chomp_interface_plugin_description.xml)
 
-if(CATKIN_ENABLE_TESTING)
-  # additional test dependencies
-  find_package(rostest REQUIRED)
-  add_rostest_gtest(chomp_moveit_test
-    test/chomp_moveit.test
-    test/chomp_moveit_test.cpp)
-  target_link_libraries(chomp_moveit_test
-    ${catkin_LIBRARIES}
-    ${rostest_LIBRARIES})
-endif()
+# TODO: Enable testing () if(CATKIN_ENABLE_TESTING) set(CHOMP_TEST_DEPS
+# moveit_ros_planning_interface) else() set(CHOMP_TEST_DEPS) endif()
+
+ament_package()

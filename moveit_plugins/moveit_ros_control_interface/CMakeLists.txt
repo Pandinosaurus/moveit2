@@ -1,101 +1,101 @@
-cmake_minimum_required(VERSION 3.1.3)
-project(moveit_ros_control_interface)
+cmake_minimum_required(VERSION 3.22)
+project(moveit_ros_control_interface LANGUAGES CXX)
 
-if(NOT "${CMAKE_CXX_STANDARD}")
-  set(CMAKE_CXX_STANDARD 14)
-endif()
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+find_package(ament_cmake REQUIRED)
 
-find_package(catkin REQUIRED COMPONENTS
-  actionlib
-  controller_manager_msgs
-  moveit_core
-  moveit_simple_controller_manager
-  pluginlib
-  trajectory_msgs
-)
-## System dependencies are found with CMake's conventions
-find_package(Boost REQUIRED COMPONENTS system thread)
+set(THIS_PACKAGE_INCLUDE_DEPENDS
+    rclcpp_action controller_manager_msgs moveit_core
+    moveit_simple_controller_manager pluginlib trajectory_msgs)
 
-catkin_package(
-  INCLUDE_DIRS include
-  LIBRARIES
-    ${PROJECT_NAME}_plugin
-    ${PROJECT_NAME}_trajectory_plugin
-  CATKIN_DEPENDS
-    actionlib
-    controller_manager_msgs
-    moveit_core
-    trajectory_msgs
-  DEPENDS Boost
-)
+foreach(dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
+  find_package(${dependency} REQUIRED)
+endforeach()
 
-include_directories(include)
-include_directories(SYSTEM ${catkin_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS})
+# Common cmake code applied to all moveit packages
+find_package(moveit_common REQUIRED)
+moveit_package()
 
-add_library(${PROJECT_NAME}_plugin
-  src/controller_manager_plugin.cpp
-)
-set_target_properties(${PROJECT_NAME}_plugin PROPERTIES VERSION "${${PROJECT_NAME}_VERSION}")
-target_link_libraries(${PROJECT_NAME}_plugin
-  ${catkin_LIBRARIES} ${Boost_LIBRARIES}
-)
+# Finds Boost Components
+include(ConfigExtras.cmake)
 
-add_library(${PROJECT_NAME}_trajectory_plugin
-  src/joint_trajectory_controller_plugin.cpp
-)
-set_target_properties(${PROJECT_NAME}_trajectory_plugin PROPERTIES VERSION "${${PROJECT_NAME}_VERSION}")
-target_link_libraries(${PROJECT_NAME}_trajectory_plugin
-  ${catkin_LIBRARIES} ${Boost_LIBRARIES}
-)
+add_library(moveit_ros_control_interface_plugin SHARED
+            src/controller_manager_plugin.cpp)
+set_target_properties(
+  moveit_ros_control_interface_plugin
+  PROPERTIES VERSION "${moveit_ros_control_interface_VERSION}")
+target_include_directories(moveit_ros_control_interface_plugin PRIVATE include)
+ament_target_dependencies(moveit_ros_control_interface_plugin
+                          ${THIS_PACKAGE_INCLUDE_DEPENDS} Boost)
 
+add_library(moveit_ros_control_interface_trajectory_plugin SHARED
+            src/joint_trajectory_controller_plugin.cpp)
+set_target_properties(
+  moveit_ros_control_interface_trajectory_plugin
+  PROPERTIES VERSION "${moveit_ros_control_interface_VERSION}")
+target_include_directories(moveit_ros_control_interface_trajectory_plugin
+                           PRIVATE include)
+ament_target_dependencies(moveit_ros_control_interface_trajectory_plugin
+                          ${THIS_PACKAGE_INCLUDE_DEPENDS} Boost)
 
-#############
-## Install ##
-#############
+add_library(moveit_ros_control_interface_gripper_plugin SHARED
+            src/gripper_command_controller_plugin.cpp)
+set_target_properties(
+  moveit_ros_control_interface_gripper_plugin
+  PROPERTIES VERSION "${moveit_ros_control_interface_VERSION}")
+target_include_directories(moveit_ros_control_interface_gripper_plugin
+                           PRIVATE include)
+ament_target_dependencies(moveit_ros_control_interface_gripper_plugin
+                          ${THIS_PACKAGE_INCLUDE_DEPENDS} Boost)
 
-# all install targets should use catkin DESTINATION variables
-# See http://ros.org/doc/api/catkin/html/adv_user_guide/variables.html
+add_library(moveit_ros_control_interface_parallel_gripper_plugin SHARED
+            src/parallel_gripper_command_controller_plugin.cpp)
+set_target_properties(
+  moveit_ros_control_interface_parallel_gripper_plugin
+  PROPERTIES VERSION "${moveit_ros_control_interface_VERSION}")
+target_include_directories(moveit_ros_control_interface_parallel_gripper_plugin
+                           PRIVATE include)
+ament_target_dependencies(moveit_ros_control_interface_parallel_gripper_plugin
+                          ${THIS_PACKAGE_INCLUDE_DEPENDS} Boost)
 
-## Mark executable scripts (Python etc.) for installation
-## in contrast to setup.py, you can choose the destination
-# install(PROGRAMS
-#   scripts/my_python_script
-#   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-# )
+add_library(moveit_ros_control_interface_empty_plugin SHARED
+            src/empty_controller_plugin.cpp)
+set_target_properties(
+  moveit_ros_control_interface_empty_plugin
+  PROPERTIES VERSION "${moveit_ros_control_interface_VERSION}")
+target_include_directories(moveit_ros_control_interface_empty_plugin
+                           PRIVATE include)
+ament_target_dependencies(moveit_ros_control_interface_empty_plugin
+                          ${THIS_PACKAGE_INCLUDE_DEPENDS} Boost)
 
-## Mark executables and/or libraries for installation
-install(TARGETS ${PROJECT_NAME}_plugin ${PROJECT_NAME}_trajectory_plugin
-ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION}
-)
+# ##############################################################################
+# Install ##
+# ##############################################################################
 
-## Mark cpp header files for installation
-install(DIRECTORY include/${PROJECT_NAME}/
-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
-)
-install(FILES moveit_core_plugins.xml moveit_ros_control_interface_plugins.xml
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-)
+set(TARGET_LIBRARIES
+    moveit_ros_control_interface_plugin
+    moveit_ros_control_interface_trajectory_plugin
+    moveit_ros_control_interface_gripper_plugin
+    moveit_ros_control_interface_parallel_gripper_plugin
+    moveit_ros_control_interface_empty_plugin)
 
-## Mark other files for installation (e.g. launch and bag files, etc.)
-# install(FILES
-#   # myfile1
-#   # myfile2
-#   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-# )
+# Mark executables and/or libraries for installation
+install(
+  TARGETS ${TARGET_LIBRARIES}
+  EXPORT moveit_ros_control_interfaceTargets
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+  INCLUDES
+  DESTINATION include/moveit_ros_control_interface)
 
-#############
-## Testing ##
-#############
+# Mark cpp header files for installation
+install(DIRECTORY include/ DESTINATION include/moveit_ros_control_interface)
 
-## Add gtest based cpp test target and link libraries
-# catkin_add_gtest(${PROJECT_NAME}-test test/test_canopen_master.cpp)
-# if(TARGET ${PROJECT_NAME}-test)
-#   target_link_libraries(${PROJECT_NAME}-test ${PROJECT_NAME})
-# endif()
+pluginlib_export_plugin_description_file(moveit_core moveit_core_plugins.xml)
+pluginlib_export_plugin_description_file(
+  moveit_ros_control_interface moveit_ros_control_interface_plugins.xml)
 
-## Add folders to be run by python nosetests
-# catkin_add_nosetests(test)
+ament_export_targets(moveit_ros_control_interfaceTargets HAS_LIBRARY_TARGET)
+ament_export_dependencies(${THIS_PACKAGE_INCLUDE_DEPENDS} Boost)
+
+ament_package(CONFIG_EXTRAS ConfigExtras.cmake)

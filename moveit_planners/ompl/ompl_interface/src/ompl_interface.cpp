@@ -34,29 +34,33 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/ompl_interface/ompl_interface.h>
-#include <moveit/robot_state/conversions.h>
-#include <moveit/kinematic_constraints/utils.h>
-#include <moveit/ompl_interface/detail/constrained_valid_state_sampler.h>
-#include <moveit/profiler/profiler.h>
-#include <moveit/utils/lexical_casts.h>
+#include <moveit/ompl_interface/ompl_interface.hpp>
+#include <moveit/robot_state/conversions.hpp>
+#include <moveit/kinematic_constraints/utils.hpp>
+#include <moveit/utils/lexical_casts.hpp>
 #include <fstream>
+#include <moveit/utils/logger.hpp>
 
 namespace ompl_interface
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit.ompl_planning.ompl_interface");
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.planners.ompl.interface");
+}
+}  // namespace
 
 OMPLInterface::OMPLInterface(const moveit::core::RobotModelConstPtr& robot_model, const rclcpp::Node::SharedPtr& node,
                              const std::string& parameter_namespace)
   : node_(node)
   , parameter_namespace_(parameter_namespace)
   , robot_model_(robot_model)
-  , constraint_sampler_manager_(new constraint_samplers::ConstraintSamplerManager())
+  , constraint_sampler_manager_(std::make_shared<constraint_samplers::ConstraintSamplerManager>())
   , context_manager_(robot_model, constraint_sampler_manager_)
   , use_constraints_approximations_(true)
-  , simplify_solutions_(true)
 {
-  RCLCPP_DEBUG(LOGGER, "Initializing OMPL interface using ROS parameters");
+  RCLCPP_DEBUG(getLogger(), "Initializing OMPL interface using ROS parameters");
   loadPlannerConfigurations();
   loadConstraintSamplers();
 }
@@ -67,12 +71,11 @@ OMPLInterface::OMPLInterface(const moveit::core::RobotModelConstPtr& robot_model
   : node_(node)
   , parameter_namespace_(parameter_namespace)
   , robot_model_(robot_model)
-  , constraint_sampler_manager_(new constraint_samplers::ConstraintSamplerManager())
+  , constraint_sampler_manager_(std::make_shared<constraint_samplers::ConstraintSamplerManager>())
   , context_manager_(robot_model, constraint_sampler_manager_)
   , use_constraints_approximations_(true)
-  , simplify_solutions_(true)
 {
-  RCLCPP_DEBUG(LOGGER, "Initializing OMPL interface using specified configuration");
+  RCLCPP_DEBUG(getLogger(), "Initializing OMPL interface using specified configuration");
   setPlannerConfigurations(pconfig);
   loadConstraintSamplers();
 }
@@ -112,22 +115,14 @@ OMPLInterface::getPlanningContext(const planning_scene::PlanningSceneConstPtr& p
 {
   ModelBasedPlanningContextPtr ctx =
       context_manager_.getPlanningContext(planning_scene, req, error_code, node_, use_constraints_approximations_);
-  if (ctx)
-  {
-    configureContext(ctx);
-  }
   return ctx;
-}
-
-void OMPLInterface::configureContext(const ModelBasedPlanningContextPtr& context) const
-{
-  context->simplifySolutions(simplify_solutions_);
 }
 
 void OMPLInterface::loadConstraintSamplers()
 {
-  constraint_sampler_manager_loader_.reset(
-      new constraint_sampler_manager_loader::ConstraintSamplerManagerLoader(node_, constraint_sampler_manager_));
+  constraint_sampler_manager_loader_ =
+      std::make_shared<constraint_sampler_manager_loader::ConstraintSamplerManagerLoader>(node_,
+                                                                                          constraint_sampler_manager_);
 }
 
 bool OMPLInterface::loadPlannerConfiguration(const std::string& group_name, const std::string& planner_id,
@@ -139,7 +134,7 @@ bool OMPLInterface::loadPlannerConfiguration(const std::string& group_name, cons
 
   if (planner_params_result.names.empty())
   {
-    RCLCPP_ERROR(LOGGER, "Could not find the planner configuration '%s' on the param server", planner_id.c_str());
+    RCLCPP_ERROR(getLogger(), "Could not find the planner configuration '%s' on the param server", planner_id.c_str());
     return false;
   }
 
@@ -169,49 +164,48 @@ void OMPLInterface::loadPlannerConfigurations()
   for (const std::string& group_name : robot_model_->getJointModelGroupNames())
   {
     // the set of planning parameters that can be specific for the group (inherited by configurations of that group)
-    static const std::string KNOWN_GROUP_PARAMS[] = { "projection_evaluator", "longest_valid_segment_fraction",
-                                                      "enforce_joint_model_state_space",
-                                                      "enforce_constrained_state_space" };
+    // with their expected parameter type
+    static const std::pair<std::string, rclcpp::ParameterType> KNOWN_GROUP_PARAMS[] = {
+      { "projection_evaluator", rclcpp::ParameterType::PARAMETER_STRING },
+      { "longest_valid_segment_fraction", rclcpp::ParameterType::PARAMETER_DOUBLE },
+      { "enforce_joint_model_state_space", rclcpp::ParameterType::PARAMETER_BOOL },
+      { "enforce_constrained_state_space", rclcpp::ParameterType::PARAMETER_BOOL }
+    };
 
     const std::string group_name_param = parameter_namespace_ + "." + group_name;
 
     // get parameters specific for the robot planning group
     std::map<std::string, std::string> specific_group_params;
-    for (const std::string& k : KNOWN_GROUP_PARAMS)
+    for (const auto& [name, type] : KNOWN_GROUP_PARAMS)
     {
-      std::string param_name{ group_name };
+      std::string param_name{ group_name_param };
       param_name += ".";
-      param_name += k;
+      param_name += name;
       if (node_->has_parameter(param_name))
       {
-        std::string value;
-        if (node_->get_parameter(param_name, value))
+        const rclcpp::Parameter parameter = node_->get_parameter(param_name);
+        if (parameter.get_type() != type)
         {
-          if (!value.empty())
-            specific_group_params[k] = value;
+          RCLCPP_ERROR_STREAM(getLogger(), "Invalid type for parameter '"
+                                               << name << "' expected [" << rclcpp::to_string(type) << "] got ["
+                                               << rclcpp::to_string(parameter.get_type()) << ']');
           continue;
         }
-
-        double value_d;
-        if (node_->get_parameter(param_name, value_d))
+        if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_STRING)
         {
-          // convert to string using no locale
-          specific_group_params[k] = moveit::core::toString(value_d);
-          continue;
+          specific_group_params[name] = parameter.as_string();
         }
-
-        int value_i;
-        if (node_->get_parameter(param_name, value_i))
+        else if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE)
         {
-          specific_group_params[k] = std::to_string(value_i);
-          continue;
+          specific_group_params[name] = moveit::core::toString(parameter.as_double());
         }
-
-        bool value_b;
-        if (node_->get_parameter(param_name, value_b))
+        else if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER)
         {
-          specific_group_params[k] = std::to_string(value_b);
-          continue;
+          specific_group_params[name] = std::to_string(parameter.as_int());
+        }
+        else if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_BOOL)
+        {
+          specific_group_params[name] = std::to_string(parameter.as_bool());
         }
       }
     }
@@ -239,7 +233,7 @@ void OMPLInterface::loadPlannerConfigurations()
 
     // get parameters specific to each planner type
     std::vector<std::string> config_names;
-    if (node_->get_parameter(group_name + ".planner_configs", config_names))
+    if (node_->get_parameter(group_name_param + ".planner_configs", config_names))
     {
       for (const auto& planner_id : config_names)
       {
@@ -252,13 +246,13 @@ void OMPLInterface::loadPlannerConfigurations()
     }
   }
 
-  for (const std::pair<const std::string, planning_interface::PlannerConfigurationSettings>& config : pconfig)
+  for (const auto& [name, config_settings] : pconfig)
   {
-    RCLCPP_DEBUG(LOGGER, "Parameters for configuration '%s'", config.first.c_str());
+    RCLCPP_DEBUG(getLogger(), "Parameters for configuration '%s'", name.c_str());
 
-    for (const std::pair<const std::string, std::string>& parameters : config.second.config)
+    for (const auto& [param_name, param_value] : config_settings.config)
     {
-      RCLCPP_DEBUG(LOGGER, " - %s = %s", parameters.first.c_str(), parameters.second.c_str());
+      RCLCPP_DEBUG_STREAM(getLogger(), " - " << param_name << " = " << param_value);
     }
   }
 
@@ -267,6 +261,6 @@ void OMPLInterface::loadPlannerConfigurations()
 
 void OMPLInterface::printStatus()
 {
-  RCLCPP_INFO(LOGGER, "OMPL ROS interface is running.");
+  RCLCPP_INFO(getLogger(), "OMPL ROS interface is running.");
 }
 }  // namespace ompl_interface

@@ -34,33 +34,51 @@
 
 /* Author: E. Gil Jones */
 
-#include <moveit/collision_distance_field/collision_distance_field_types.h>
+#include <moveit/collision_distance_field/collision_distance_field_types.hpp>
 #include <geometric_shapes/body_operations.h>
-#include <moveit/distance_field/distance_field.h>
-#include <moveit/distance_field/find_internal_points.h>
+#include <moveit/distance_field/distance_field.hpp>
+#include <moveit/distance_field/find_internal_points.hpp>
+#include <rclcpp/clock.hpp>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/time.hpp>
 #include <memory>
+#include <moveit/utils/logger.hpp>
 
-const static double EPSILON = 0.0001;
+static const double EPSILON{ 0.0001 };
 
 namespace collision_detection
 {
-static const rclcpp::Logger LOGGER =
-    rclcpp::get_logger("moveit_collision_distance_field.collision_distance_field_types");
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.core.collision_distance_field_types");
+}
+}  // namespace
 
 std::vector<CollisionSphere> determineCollisionSpheres(const bodies::Body* body, Eigen::Isometry3d& relative_transform)
 {
   std::vector<CollisionSphere> css;
 
-  bodies::BoundingCylinder cyl;
-  body->computeBoundingCylinder(cyl);
-  unsigned int num_points = ceil(cyl.length / (cyl.radius / 2.0));
-  double spacing = cyl.length / ((num_points * 1.0) - 1.0);
-  relative_transform = body->getPose().inverse() * cyl.pose;
-
-  for (unsigned int i = 1; i < num_points - 1; i++)
+  if (body->getType() == shapes::ShapeType::SPHERE)
   {
-    CollisionSphere cs(relative_transform * Eigen::Vector3d(0, 0, (-cyl.length / 2.0) + i * spacing), cyl.radius);
+    collision_detection::CollisionSphere cs(body->getPose().translation(), body->getDimensions()[0]);
     css.push_back(cs);
+  }
+  else
+  {
+    bodies::BoundingCylinder cyl;
+    body->computeBoundingCylinder(cyl);
+    unsigned int num_points = ceil(cyl.length / (cyl.radius / 2.0));
+    double spacing{ cyl.length / ((num_points * 1.0) - 1.0) };
+    relative_transform = cyl.pose;
+
+    for (unsigned int i{ 1 }; i < num_points - 1; i++)
+    {
+      collision_detection::CollisionSphere cs(
+          relative_transform * Eigen::Vector3d(0, 0, (-cyl.length / 2.0) + i * spacing), cyl.radius);
+      css.push_back(cs);
+    }
   }
 
   return css;
@@ -74,13 +92,13 @@ bool PosedDistanceField::getCollisionSphereGradients(const std::vector<Collision
 {
   // assumes gradient is properly initialized
 
-  bool in_collision = false;
-  for (unsigned int i = 0; i < sphere_list.size(); i++)
+  bool in_collision{ false };
+  for (unsigned int i{ 0 }; i < sphere_list.size(); ++i)
   {
     Eigen::Vector3d p = sphere_centers[i];
     Eigen::Vector3d grad(0, 0, 0);
     bool in_bounds;
-    double dist = this->getDistanceGradient(p.x(), p.y(), p.z(), grad.x(), grad.y(), grad.z(), in_bounds);
+    double dist = getDistanceGradient(p.x(), p.y(), p.z(), grad.x(), grad.y(), grad.z(), in_bounds);
     if (!in_bounds && grad.norm() > 0)
     {
       // out of bounds
@@ -137,8 +155,8 @@ bool getCollisionSphereGradients(const distance_field::DistanceField* distance_f
 {
   // assumes gradient is properly initialized
 
-  bool in_collision = false;
-  for (unsigned int i = 0; i < sphere_list.size(); i++)
+  bool in_collision{ false };
+  for (unsigned int i{ 0 }; i < sphere_list.size(); ++i)
   {
     Eigen::Vector3d p = sphere_centers[i];
     Eigen::Vector3d grad;
@@ -146,7 +164,7 @@ bool getCollisionSphereGradients(const distance_field::DistanceField* distance_f
     double dist = distance_field->getDistanceGradient(p.x(), p.y(), p.z(), grad.x(), grad.y(), grad.z(), in_bounds);
     if (!in_bounds && grad.norm() > EPSILON)
     {
-      RCLCPP_DEBUG(LOGGER, "Collision sphere point is out of bounds %lf, %lf, %lf", p.x(), p.y(), p.z());
+      RCLCPP_DEBUG(getLogger(), "Collision sphere point is out of bounds %lf, %lf, %lf", p.x(), p.y(), p.z());
       return true;
     }
 
@@ -195,7 +213,7 @@ bool getCollisionSphereCollision(const distance_field::DistanceField* distance_f
                                  const EigenSTL::vector_Vector3d& sphere_centers, double maximum_value,
                                  double tolerance)
 {
-  for (unsigned int i = 0; i < sphere_list.size(); i++)
+  for (unsigned int i{ 0 }; i < sphere_list.size(); ++i)
   {
     Eigen::Vector3d p = sphere_centers[i];
     Eigen::Vector3d grad;
@@ -204,7 +222,7 @@ bool getCollisionSphereCollision(const distance_field::DistanceField* distance_f
 
     if (!in_bounds && grad.norm() > 0)
     {
-      RCLCPP_DEBUG(LOGGER, "Collision sphere point is out of bounds");
+      RCLCPP_DEBUG(getLogger(), "Collision sphere point is out of bounds");
       return true;
     }
 
@@ -223,15 +241,15 @@ bool getCollisionSphereCollision(const distance_field::DistanceField* distance_f
                                  double tolerance, unsigned int num_coll, std::vector<unsigned int>& colls)
 {
   colls.clear();
-  for (unsigned int i = 0; i < sphere_list.size(); i++)
+  for (unsigned int i = 0; i < sphere_list.size(); ++i)
   {
     Eigen::Vector3d p = sphere_centers[i];
     Eigen::Vector3d grad;
-    bool in_bounds = true;
+    bool in_bounds{ true };
     double dist = distance_field->getDistanceGradient(p.x(), p.y(), p.z(), grad.x(), grad.y(), grad.z(), in_bounds);
     if (!in_bounds && (grad.norm() > 0))
     {
-      RCLCPP_DEBUG(LOGGER, "Collision sphere point is out of bounds");
+      RCLCPP_DEBUG(getLogger(), "Collision sphere point is out of bounds");
       return true;
     }
     if (maximum_value > dist && (sphere_list[i].radius_ - dist > tolerance))
@@ -275,7 +293,7 @@ void BodyDecomposition::init(const std::vector<shapes::ShapeConstPtr>& shapes, c
                              double resolution, double padding)
 {
   bodies_.clear();
-  for (unsigned int i = 0; i < shapes.size(); i++)
+  for (unsigned int i{ 0 }; i < shapes.size(); ++i)
   {
     bodies_.addBody(shapes[i].get(), poses[i], padding);
   }
@@ -285,7 +303,7 @@ void BodyDecomposition::init(const std::vector<shapes::ShapeConstPtr>& shapes, c
   relative_collision_points_.clear();
   std::vector<CollisionSphere> body_spheres;
   EigenSTL::vector_Vector3d body_collision_points;
-  for (unsigned int i = 0; i < bodies_.getCount(); i++)
+  for (unsigned int i{ 0 }; i < bodies_.getCount(); ++i)
   {
     body_spheres.clear();
     body_collision_points.clear();
@@ -299,21 +317,21 @@ void BodyDecomposition::init(const std::vector<shapes::ShapeConstPtr>& shapes, c
   }
 
   sphere_radii_.resize(collision_spheres_.size());
-  for (unsigned int i = 0; i < collision_spheres_.size(); i++)
+  for (unsigned int i{ 0 }; i < collision_spheres_.size(); ++i)
   {
     sphere_radii_[i] = collision_spheres_[i].radius_;
   }
 
   // computing bounding sphere
   std::vector<bodies::BoundingSphere> bounding_spheres(bodies_.getCount());
-  for (unsigned int i = 0; i < bodies_.getCount(); i++)
+  for (unsigned int i{ 0 }; i < bodies_.getCount(); ++i)
   {
     bodies_.getBody(i)->computeBoundingSphere(bounding_spheres[i]);
   }
   bodies::mergeBoundingSpheres(bounding_spheres, relative_bounding_sphere_);
 
-  RCLCPP_DEBUG(LOGGER, "BodyDecomposition generated %i collision spheres out of %i shapes", collision_spheres_.size(),
-               shapes.size());
+  RCLCPP_DEBUG(getLogger(), "BodyDecomposition generated %zu collision spheres out of %zu shapes",
+               collision_spheres_.size(), shapes.size());
 }
 
 BodyDecomposition::~BodyDecomposition()
@@ -352,7 +370,7 @@ void PosedBodyPointDecomposition::updatePose(const Eigen::Isometry3d& trans)
   {
     posed_collision_points_.resize(body_decomposition_->getCollisionPoints().size());
 
-    for (unsigned int i = 0; i < body_decomposition_->getCollisionPoints().size(); i++)
+    for (unsigned int i{ 0 }; i < body_decomposition_->getCollisionPoints().size(); ++i)
     {
       posed_collision_points_[i] = trans * body_decomposition_->getCollisionPoints()[i];
     }
@@ -371,7 +389,7 @@ void PosedBodySphereDecomposition::updatePose(const Eigen::Isometry3d& trans)
 {
   // updating sphere centers
   posed_bounding_sphere_center_ = trans * body_decomposition_->getRelativeBoundingSphere().center;
-  for (unsigned int i = 0; i < body_decomposition_->getCollisionSpheres().size(); i++)
+  for (unsigned int i{ 0 }; i < body_decomposition_->getCollisionSpheres().size(); ++i)
   {
     sphere_centers_[i] = trans * body_decomposition_->getCollisionSpheres()[i].relative_vec_;
   }
@@ -380,7 +398,7 @@ void PosedBodySphereDecomposition::updatePose(const Eigen::Isometry3d& trans)
   if (!body_decomposition_->getCollisionPoints().empty())
   {
     posed_collision_points_.resize(body_decomposition_->getCollisionPoints().size());
-    for (unsigned int i = 0; i < body_decomposition_->getCollisionPoints().size(); i++)
+    for (unsigned int i{ 0 }; i < body_decomposition_->getCollisionPoints().size(); ++i)
     {
       posed_collision_points_[i] = trans * body_decomposition_->getCollisionPoints()[i];
     }
@@ -392,10 +410,10 @@ bool doBoundingSpheresIntersect(const PosedBodySphereDecompositionConstPtr& p1,
 {
   Eigen::Vector3d p1_sphere_center = p1->getBoundingSphereCenter();
   Eigen::Vector3d p2_sphere_center = p2->getBoundingSphereCenter();
-  double p1_radius = p1->getBoundingSphereRadius();
-  double p2_radius = p2->getBoundingSphereRadius();
+  double p1_radius{ p1->getBoundingSphereRadius() };
+  double p2_radius{ p2->getBoundingSphereRadius() };
 
-  double dist = (p1_sphere_center - p2_sphere_center).squaredNorm();
+  double dist{ (p1_sphere_center - p2_sphere_center).squaredNorm() };
   return dist < (p1_radius + p2_radius);
 }
 
@@ -404,13 +422,13 @@ void getCollisionSphereMarkers(const std_msgs::msg::ColorRGBA& color, const std:
                                const std::vector<PosedBodySphereDecompositionPtr>& posed_decompositions,
                                visualization_msgs::msg::MarkerArray& arr)
 {
-  unsigned int count = 0;
+  unsigned int count{ 0 };
   rclcpp::Clock ros_clock;
   for (const auto& posed_decomposition : posed_decompositions)
   {
     if (posed_decomposition)
     {
-      for (unsigned int j = 0; j < posed_decomposition->getCollisionSpheres().size(); j++)
+      for (unsigned int j{ 0 }; j < posed_decomposition->getCollisionSpheres().size(); ++j)
       {
         visualization_msgs::msg::Marker sphere;
         sphere.type = visualization_msgs::msg::Marker::SPHERE;
@@ -430,7 +448,7 @@ void getCollisionSphereMarkers(const std_msgs::msg::ColorRGBA& color, const std:
   }
 }
 
-void getProximityGradientMarkers(const std::string& frame_id, const std::string& ns, const rclcpp::Duration& dur,
+void getProximityGradientMarkers(const std::string& frame_id, const std::string& ns, const rclcpp::Duration& /*dur*/,
                                  const std::vector<PosedBodySphereDecompositionPtr>& posed_decompositions,
                                  const std::vector<PosedBodySphereDecompositionVectorPtr>& posed_vector_decompositions,
                                  const std::vector<GradientInfo>& gradients, visualization_msgs::msg::MarkerArray& arr)
@@ -438,13 +456,14 @@ void getProximityGradientMarkers(const std::string& frame_id, const std::string&
   rclcpp::Clock ros_clock;
   if (gradients.size() != posed_decompositions.size() + posed_vector_decompositions.size())
   {
-    RCLCPP_WARN(LOGGER, "Size mismatch between gradients %u and decompositions %u", (unsigned int)gradients.size(),
-                (unsigned int)(posed_decompositions.size() + posed_vector_decompositions.size()));
+    RCLCPP_WARN(getLogger(), "Size mismatch between gradients %u and decompositions %u",
+                static_cast<unsigned int>(gradients.size()),
+                static_cast<unsigned int>((posed_decompositions.size() + posed_vector_decompositions.size())));
     return;
   }
-  for (unsigned int i = 0; i < gradients.size(); i++)
+  for (unsigned int i{ 0 }; i < gradients.size(); ++i)
   {
-    for (unsigned int j = 0; j < gradients[i].distances.size(); j++)
+    for (unsigned int j{ 0 }; j < gradients[i].distances.size(); ++j)
     {
       visualization_msgs::msg::Marker arrow_mark;
       arrow_mark.header.frame_id = frame_id;
@@ -458,9 +477,9 @@ void getProximityGradientMarkers(const std::string& frame_id, const std::string&
         arrow_mark.ns = ns;
       }
       arrow_mark.id = i * 1000 + j;
-      double xscale = 0.0;
-      double yscale = 0.0;
-      double zscale = 0.0;
+      double xscale{ 0.0 };
+      double yscale{ 0.0 };
+      double zscale{ 0.0 };
       if (gradients[i].distances[j] > 0.0 && gradients[i].distances[j] != DBL_MAX)
       {
         if (gradients[i].gradients[j].norm() > 0.0)
@@ -471,12 +490,12 @@ void getProximityGradientMarkers(const std::string& frame_id, const std::string&
         }
         else
         {
-          RCLCPP_DEBUG(LOGGER, "Negative length for %u %d %lf", i, arrow_mark.id, gradients[i].gradients[j].norm());
+          RCLCPP_DEBUG(getLogger(), "Negative length for %u %d %lf", i, arrow_mark.id, gradients[i].gradients[j].norm());
         }
       }
       else
       {
-        RCLCPP_DEBUG(LOGGER, "Negative dist %lf for %u %d", gradients[i].distances[j], i, arrow_mark.id);
+        RCLCPP_DEBUG(getLogger(), "Negative dist %lf for %u %d", gradients[i].distances[j], i, arrow_mark.id);
       }
       arrow_mark.points.resize(2);
       if (i < posed_decompositions.size())
@@ -530,7 +549,7 @@ void getProximityGradientMarkers(const std::string& frame_id, const std::string&
   }
 }
 
-void getCollisionMarkers(const std::string& frame_id, const std::string& ns, const rclcpp::Duration& dur,
+void getCollisionMarkers(const std::string& frame_id, const std::string& ns, const rclcpp::Duration& /*dur*/,
                          const std::vector<PosedBodySphereDecompositionPtr>& posed_decompositions,
                          const std::vector<PosedBodySphereDecompositionVectorPtr>& posed_vector_decompositions,
                          const std::vector<GradientInfo>& gradients, visualization_msgs::msg::MarkerArray& arr)
@@ -538,13 +557,13 @@ void getCollisionMarkers(const std::string& frame_id, const std::string& ns, con
   rclcpp::Clock ros_clock;
   if (gradients.size() != posed_decompositions.size() + posed_vector_decompositions.size())
   {
-    RCLCPP_WARN(LOGGER, "Size mismatch between gradients %zu and decompositions %zu", gradients.size(),
+    RCLCPP_WARN(getLogger(), "Size mismatch between gradients %zu and decompositions %zu", gradients.size(),
                 posed_decompositions.size() + posed_vector_decompositions.size());
     return;
   }
-  for (unsigned int i = 0; i < gradients.size(); i++)
+  for (unsigned int i{ 0 }; i < gradients.size(); ++i)
   {
-    for (unsigned int j = 0; j < gradients[i].types.size(); j++)
+    for (unsigned int j{ 0 }; j < gradients[i].types.size(); ++j)
     {
       visualization_msgs::msg::Marker sphere_mark;
       sphere_mark.type = visualization_msgs::msg::Marker::SPHERE;
@@ -609,5 +628,3 @@ void getCollisionMarkers(const std::string& frame_id, const std::string& ns, con
   }
 }
 }  // namespace collision_detection
-const rclcpp::Logger collision_detection::PosedBodyPointDecompositionVector::LOGGER = collision_detection::LOGGER;
-const rclcpp::Logger collision_detection::PosedBodySphereDecompositionVector::LOGGER = collision_detection::LOGGER;

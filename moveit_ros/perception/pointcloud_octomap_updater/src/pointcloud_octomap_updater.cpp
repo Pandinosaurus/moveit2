@@ -35,20 +35,30 @@
 /* Author: Jon Binney, Ioan Sucan */
 
 #include <cmath>
-#include <moveit/pointcloud_octomap_updater/pointcloud_octomap_updater.h>
-#include <moveit/occupancy_map_monitor/occupancy_map_monitor.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <moveit/pointcloud_octomap_updater/pointcloud_octomap_updater.hpp>
+#include <moveit/occupancy_map_monitor/occupancy_map_monitor.hpp>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+// TODO: Remove conditional includes when released to all active distros.
+#if __has_include(<tf2/LinearMath/Vector3.hpp>)
+#include <tf2/LinearMath/Vector3.hpp>
+#else
 #include <tf2/LinearMath/Vector3.h>
+#endif
+#if __has_include(<tf2/LinearMath/Transform.hpp>)
+#include <tf2/LinearMath/Transform.hpp>
+#else
 #include <tf2/LinearMath/Transform.h>
+#endif
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <tf2_ros/create_timer_interface.h>
 #include <tf2_ros/create_timer_ros.h>
+#include <moveit/utils/logger.hpp>
+#include <rclcpp/version.h>
 
 #include <memory>
 
 namespace occupancy_map_monitor
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit.ros.perception.pointcloud_octomap_updater");
 PointCloudOctomapUpdater::PointCloudOctomapUpdater()
   : OccupancyMapUpdater("PointCloudUpdater")
   , scale_(1.0)
@@ -58,16 +68,14 @@ PointCloudOctomapUpdater::PointCloudOctomapUpdater()
   , max_update_rate_(0)
   , point_cloud_subscriber_(nullptr)
   , point_cloud_filter_(nullptr)
+  , logger_(moveit::getLogger("moveit.ros.pointcloud_octomap_updater"))
 {
-}
-
-PointCloudOctomapUpdater::~PointCloudOctomapUpdater()
-{
-  stopHelper();
 }
 
 bool PointCloudOctomapUpdater::setParams(const std::string& name_space)
 {
+  // This parameter is optional
+  node_->get_parameter_or(name_space + ".ns", ns_, std::string());
   return node_->get_parameter(name_space + ".point_cloud_topic", point_cloud_topic_) &&
          node_->get_parameter(name_space + ".max_range", max_range_) &&
          node_->get_parameter(name_space + ".padding_offset", padding_) &&
@@ -80,50 +88,65 @@ bool PointCloudOctomapUpdater::setParams(const std::string& name_space)
 bool PointCloudOctomapUpdater::initialize(const rclcpp::Node::SharedPtr& node)
 {
   node_ = node;
-  tf_buffer_.reset(new tf2_ros::Buffer(node_->get_clock()));
+  tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
   auto create_timer_interface =
       std::make_shared<tf2_ros::CreateTimerROS>(node->get_node_base_interface(), node->get_node_timers_interface());
   tf_buffer_->setCreateTimerInterface(create_timer_interface);
-  tf_listener_.reset(new tf2_ros::TransformListener(*tf_buffer_));
-  shape_mask_.reset(new point_containment_filter::ShapeMask());
-  shape_mask_->setTransformCallback(boost::bind(&PointCloudOctomapUpdater::getShapeTransform, this, _1, _2));
-  last_update_time_ = node_->now();
+  tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+  shape_mask_ = std::make_unique<point_containment_filter::ShapeMask>();
+  shape_mask_->setTransformCallback(
+      [this](ShapeHandle shape, Eigen::Isometry3d& tf) { return getShapeTransform(shape, tf); });
+
   return true;
 }
 
 void PointCloudOctomapUpdater::start()
 {
+  std::string prefix = "";
+  if (!ns_.empty())
+    prefix = ns_ + "/";
+
   if (!filtered_cloud_topic_.empty())
-    filtered_cloud_publisher_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>(filtered_cloud_topic_, 10);
+  {
+    filtered_cloud_publisher_ =
+        node_->create_publisher<sensor_msgs::msg::PointCloud2>(prefix + filtered_cloud_topic_, rclcpp::SensorDataQoS());
+  }
 
   if (point_cloud_subscriber_)
     return;
+
+  rclcpp::SubscriptionOptions options;
+  options.callback_group = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   /* subscribe to point cloud topic using tf filter*/
-  point_cloud_subscriber_ = new message_filters::Subscriber<sensor_msgs::msg::PointCloud2>(node_, point_cloud_topic_);
+  auto qos_profile =
+#if RCLCPP_VERSION_GTE(28, 3, 0)
+      rclcpp::SensorDataQoS();
+#else
+      rmw_qos_profile_sensor_data;
+#endif
+  point_cloud_subscriber_ =
+      new message_filters::Subscriber<sensor_msgs::msg::PointCloud2>(node_, point_cloud_topic_, qos_profile, options);
   if (tf_listener_ && tf_buffer_ && !monitor_->getMapFrame().empty())
   {
     point_cloud_filter_ = new tf2_ros::MessageFilter<sensor_msgs::msg::PointCloud2>(
         *point_cloud_subscriber_, *tf_buffer_, monitor_->getMapFrame(), 5, node_);
-    point_cloud_filter_->registerCallback(boost::bind(&PointCloudOctomapUpdater::cloudMsgCallback, this, _1));
-    RCLCPP_INFO(LOGGER, "Listening to '%s' using message filter with target frame '%s'", point_cloud_topic_.c_str(),
+    point_cloud_filter_->registerCallback(
+        [this](const sensor_msgs::msg::PointCloud2::ConstSharedPtr& cloud) { cloudMsgCallback(cloud); });
+    RCLCPP_INFO(logger_, "Listening to '%s' using message filter with target frame '%s'", point_cloud_topic_.c_str(),
                 point_cloud_filter_->getTargetFramesString().c_str());
   }
   else
   {
-    point_cloud_subscriber_->registerCallback(boost::bind(&PointCloudOctomapUpdater::cloudMsgCallback, this, _1));
-    RCLCPP_INFO(LOGGER, "Listening to '%s'", point_cloud_topic_.c_str());
+    point_cloud_subscriber_->registerCallback(
+        [this](const sensor_msgs::msg::PointCloud2::ConstSharedPtr& cloud) { cloudMsgCallback(cloud); });
+    RCLCPP_INFO(logger_, "Listening to '%s'", point_cloud_topic_.c_str());
   }
-}
-
-void PointCloudOctomapUpdater::stopHelper()
-{
-  delete point_cloud_filter_;
-  delete point_cloud_subscriber_;
 }
 
 void PointCloudOctomapUpdater::stop()
 {
-  stopHelper();
+  delete point_cloud_filter_;
+  delete point_cloud_subscriber_;
   point_cloud_filter_ = nullptr;
   point_cloud_subscriber_ = nullptr;
 }
@@ -132,9 +155,13 @@ ShapeHandle PointCloudOctomapUpdater::excludeShape(const shapes::ShapeConstPtr& 
 {
   ShapeHandle h = 0;
   if (shape_mask_)
+  {
     h = shape_mask_->addShape(shape, scale_, padding_);
+  }
   else
-    RCLCPP_ERROR(LOGGER, "Shape filter not yet initialized!");
+  {
+    RCLCPP_ERROR(logger_, "Shape filter not yet initialized!");
+  }
   return h;
 }
 
@@ -161,16 +188,15 @@ void PointCloudOctomapUpdater::updateMask(const sensor_msgs::msg::PointCloud2& /
 
 void PointCloudOctomapUpdater::cloudMsgCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& cloud_msg)
 {
-  RCLCPP_DEBUG(LOGGER, "Received a new point cloud message");
+  RCLCPP_DEBUG(logger_, "Received a new point cloud message");
   rclcpp::Time start = rclcpp::Clock(RCL_ROS_TIME).now();
 
   if (max_update_rate_ > 0)
   {
     // ensure we are not updating the octomap representation too often
-    if ((rclcpp::Clock(RCL_ROS_TIME).now() - last_update_time_) <=
-        rclcpp::Duration(std::chrono::duration<double>(1.0 / max_update_rate_)))
+    if ((node_->now() - last_update_time_) <= rclcpp::Duration::from_seconds(1.0 / max_update_rate_))
       return;
-    last_update_time_ = rclcpp::Clock(RCL_ROS_TIME).now();
+    last_update_time_ = node_->now();
   }
 
   if (monitor_->getMapFrame().empty())
@@ -179,7 +205,9 @@ void PointCloudOctomapUpdater::cloudMsgCallback(const sensor_msgs::msg::PointClo
   /* get transform for cloud into map frame */
   tf2::Stamped<tf2::Transform> map_h_sensor;
   if (monitor_->getMapFrame() == cloud_msg->header.frame_id)
+  {
     map_h_sensor.setIdentity();
+  }
   else
   {
     if (tf_buffer_)
@@ -192,7 +220,7 @@ void PointCloudOctomapUpdater::cloudMsgCallback(const sensor_msgs::msg::PointClo
       }
       catch (tf2::TransformException& ex)
       {
-        RCLCPP_ERROR_STREAM(LOGGER, "Transform error of sensor data: " << ex.what() << "; quitting callback");
+        RCLCPP_ERROR_STREAM(logger_, "Transform error of sensor data: " << ex.what() << "; quitting callback");
         return;
       }
     }
@@ -206,11 +234,7 @@ void PointCloudOctomapUpdater::cloudMsgCallback(const sensor_msgs::msg::PointClo
   Eigen::Vector3d sensor_origin_eigen(sensor_origin_tf.getX(), sensor_origin_tf.getY(), sensor_origin_tf.getZ());
 
   if (!updateTransformCache(cloud_msg->header.frame_id, cloud_msg->header.stamp))
-  {
-    rclcpp::Clock& clock = *node_->get_clock();
-    RCLCPP_ERROR_STREAM_THROTTLE(LOGGER, clock, 1000, "Transform cache was not updated. Self-filtering may fail.");
     return;
-  }
 
   /* mask out points on the robot */
   shape_mask_->maskContainment(*cloud_msg, sensor_origin_eigen, 0.0, max_range_, mask_);
@@ -222,22 +246,22 @@ void PointCloudOctomapUpdater::cloudMsgCallback(const sensor_msgs::msg::PointClo
   // We only use these iterators if we are creating a filtered_cloud for
   // publishing. We cannot default construct these, so we use unique_ptr's
   // to defer construction
-  std::unique_ptr<sensor_msgs::PointCloud2Iterator<float> > iter_filtered_x;
-  std::unique_ptr<sensor_msgs::PointCloud2Iterator<float> > iter_filtered_y;
-  std::unique_ptr<sensor_msgs::PointCloud2Iterator<float> > iter_filtered_z;
+  std::unique_ptr<sensor_msgs::PointCloud2Iterator<float>> iter_filtered_x;
+  std::unique_ptr<sensor_msgs::PointCloud2Iterator<float>> iter_filtered_y;
+  std::unique_ptr<sensor_msgs::PointCloud2Iterator<float>> iter_filtered_z;
 
   if (!filtered_cloud_topic_.empty())
   {
-    filtered_cloud.reset(new sensor_msgs::msg::PointCloud2());
+    filtered_cloud = std::make_unique<sensor_msgs::msg::PointCloud2>();
     filtered_cloud->header = cloud_msg->header;
     sensor_msgs::PointCloud2Modifier pcd_modifier(*filtered_cloud);
     pcd_modifier.setPointCloud2FieldsByString(1, "xyz");
     pcd_modifier.resize(cloud_msg->width * cloud_msg->height);
 
     // we have created a filtered_out, so we can create the iterators now
-    iter_filtered_x.reset(new sensor_msgs::PointCloud2Iterator<float>(*filtered_cloud, "x"));
-    iter_filtered_y.reset(new sensor_msgs::PointCloud2Iterator<float>(*filtered_cloud, "y"));
-    iter_filtered_z.reset(new sensor_msgs::PointCloud2Iterator<float>(*filtered_cloud, "z"));
+    iter_filtered_x = std::make_unique<sensor_msgs::PointCloud2Iterator<float>>(*filtered_cloud, "x");
+    iter_filtered_y = std::make_unique<sensor_msgs::PointCloud2Iterator<float>>(*filtered_cloud, "y");
+    iter_filtered_z = std::make_unique<sensor_msgs::PointCloud2Iterator<float>>(*filtered_cloud, "z");
   }
   size_t filtered_cloud_size = 0;
 
@@ -262,17 +286,24 @@ void PointCloudOctomapUpdater::cloudMsgCallback(const sensor_msgs::msg::PointClo
         /* check for NaN */
         if (!std::isnan(pt_iter[0]) && !std::isnan(pt_iter[1]) && !std::isnan(pt_iter[2]))
         {
-          /* transform to map frame */
-          tf2::Vector3 point_tf = map_h_sensor * tf2::Vector3(pt_iter[0], pt_iter[1], pt_iter[2]);
-
           /* occupied cell at ray endpoint if ray is shorter than max range and this point
              isn't on a part of the robot*/
           if (mask_[row_c + col] == point_containment_filter::ShapeMask::INSIDE)
+          {
+            // transform to map frame
+            tf2::Vector3 point_tf = map_h_sensor * tf2::Vector3(pt_iter[0], pt_iter[1], pt_iter[2]);
             model_cells.insert(tree_->coordToKey(point_tf.getX(), point_tf.getY(), point_tf.getZ()));
+          }
           else if (mask_[row_c + col] == point_containment_filter::ShapeMask::CLIP)
-            clip_cells.insert(tree_->coordToKey(point_tf.getX(), point_tf.getY(), point_tf.getZ()));
+          {
+            tf2::Vector3 clipped_point_tf =
+                map_h_sensor * (tf2::Vector3(pt_iter[0], pt_iter[1], pt_iter[2]).normalize() * max_range_);
+            clip_cells.insert(
+                tree_->coordToKey(clipped_point_tf.getX(), clipped_point_tf.getY(), clipped_point_tf.getZ()));
+          }
           else
           {
+            tf2::Vector3 point_tf = map_h_sensor * tf2::Vector3(pt_iter[0], pt_iter[1], pt_iter[2]);
             occupied_cells.insert(tree_->coordToKey(point_tf.getX(), point_tf.getY(), point_tf.getZ()));
             // build list of valid points if we want to publish them
             if (filtered_cloud)
@@ -292,18 +323,24 @@ void PointCloudOctomapUpdater::cloudMsgCallback(const sensor_msgs::msg::PointClo
 
     /* compute the free cells along each ray that ends at an occupied cell */
     for (const octomap::OcTreeKey& occupied_cell : occupied_cells)
+    {
       if (tree_->computeRayKeys(sensor_origin, tree_->keyToCoord(occupied_cell), key_ray_))
         free_cells.insert(key_ray_.begin(), key_ray_.end());
+    }
 
     /* compute the free cells along each ray that ends at a model cell */
     for (const octomap::OcTreeKey& model_cell : model_cells)
+    {
       if (tree_->computeRayKeys(sensor_origin, tree_->keyToCoord(model_cell), key_ray_))
         free_cells.insert(key_ray_.begin(), key_ray_.end());
+    }
 
     /* compute the free cells along each ray that ends at a clipped cell */
     for (const octomap::OcTreeKey& clip_cell : clip_cells)
+    {
       if (tree_->computeRayKeys(sensor_origin, tree_->keyToCoord(clip_cell), key_ray_))
         free_cells.insert(key_ray_.begin(), key_ray_.end());
+    }
   }
   catch (...)
   {
@@ -340,10 +377,10 @@ void PointCloudOctomapUpdater::cloudMsgCallback(const sensor_msgs::msg::PointClo
   }
   catch (...)
   {
-    RCLCPP_ERROR(LOGGER, "Internal error while updating octree");
+    RCLCPP_ERROR(logger_, "Internal error while updating octree");
   }
   tree_->unlockWrite();
-  RCLCPP_DEBUG(LOGGER, "Processed point cloud in %lf ms", (node_->now() - start).seconds() * 1000.0);
+  RCLCPP_DEBUG(logger_, "Processed point cloud in %lf ms", (node_->now() - start).seconds() * 1000.0);
   tree_->triggerUpdateCallback();
 
   if (filtered_cloud)

@@ -34,18 +34,26 @@
 
 /* Author: Mrinal Kalakrishnan, Ken Anderson, E. Gil Jones */
 
-#include <moveit/distance_field/distance_field.h>
-#include <moveit/distance_field/find_internal_points.h>
+#include <moveit/distance_field/distance_field.hpp>
+#include <moveit/distance_field/find_internal_points.hpp>
 #include <geometric_shapes/body_operations.h>
-#include <tf2_eigen/tf2_eigen.h>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <rclcpp/time.hpp>
+#include <tf2_eigen/tf2_eigen.hpp>
 #include <octomap/octomap.h>
 #include <octomap/OcTree.h>
-#include "rclcpp/rclcpp.hpp"
+#include <moveit/utils/logger.hpp>
 
 namespace distance_field
 {
-// Logger
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_distance_field.distance_field");
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.core.distance_field");
+}
+}  // namespace
 
 DistanceField::DistanceField(double size_x, double size_y, double size_z, double resolution, double origin_x,
                              double origin_y, double origin_z)
@@ -198,14 +206,14 @@ void DistanceField::getGradientMarkers(double min_distance, double max_distance,
 }
 
 bool DistanceField::getShapePoints(const shapes::Shape* shape, const Eigen::Isometry3d& pose,
-                                   EigenSTL::vector_Vector3d* points)
+                                   EigenSTL::vector_Vector3d* points) const
 {
   if (shape->type == shapes::OCTREE)
   {
     const shapes::OcTree* oc = dynamic_cast<const shapes::OcTree*>(shape);
     if (!oc)
     {
-      RCLCPP_ERROR(LOGGER, "Problem dynamic casting shape that claims to be OcTree");
+      RCLCPP_ERROR(getLogger(), "Problem dynamic casting shape that claims to be OcTree");
       return false;
     }
     getOcTreePoints(oc->octree.get(), points);
@@ -229,15 +237,7 @@ void DistanceField::addShapeToField(const shapes::Shape* shape, const Eigen::Iso
   addPointsToField(point_vec);
 }
 
-// DEPRECATED
-void DistanceField::addShapeToField(const shapes::Shape* shape, const geometry_msgs::msg::Pose& pose)
-{
-  Eigen::Isometry3d pose_e;
-  tf2::fromMsg(pose, pose_e);
-  addShapeToField(shape, pose_e);
-}
-
-void DistanceField::getOcTreePoints(const octomap::OcTree* octree, EigenSTL::vector_Vector3d* points)
+void DistanceField::getOcTreePoints(const octomap::OcTree* octree, EigenSTL::vector_Vector3d* points) const
 {
   // lower extent
   double min_x, min_y, min_z;
@@ -295,7 +295,7 @@ void DistanceField::moveShapeInField(const shapes::Shape* shape, const Eigen::Is
 {
   if (shape->type == shapes::OCTREE)
   {
-    RCLCPP_WARN(LOGGER, "Move shape not supported for Octree");
+    RCLCPP_WARN(getLogger(), "Move shape not supported for Octree");
     return;
   }
   bodies::Body* body = bodies::createEmptyBodyFromShapeType(shape->type);
@@ -311,16 +311,6 @@ void DistanceField::moveShapeInField(const shapes::Shape* shape, const Eigen::Is
   updatePointsInField(old_point_vec, new_point_vec);
 }
 
-// DEPRECATED
-void DistanceField::moveShapeInField(const shapes::Shape* shape, const geometry_msgs::msg::Pose& old_pose,
-                                     const geometry_msgs::msg::Pose& new_pose)
-{
-  Eigen::Isometry3d old_pose_e, new_pose_e;
-  tf2::fromMsg(old_pose, old_pose_e);
-  tf2::fromMsg(new_pose, new_pose_e);
-  moveShapeInField(shape, old_pose_e, new_pose_e);
-}
-
 void DistanceField::removeShapeFromField(const shapes::Shape* shape, const Eigen::Isometry3d& pose)
 {
   bodies::Body* body = bodies::createEmptyBodyFromShapeType(shape->type);
@@ -331,14 +321,6 @@ void DistanceField::removeShapeFromField(const shapes::Shape* shape, const Eigen
   findInternalPointsConvex(*body, resolution_, point_vec);
   delete body;
   removePointsFromField(point_vec);
-}
-
-// DEPRECATED
-void DistanceField::removeShapeFromField(const shapes::Shape* shape, const geometry_msgs::msg::Pose& pose)
-{
-  Eigen::Isometry3d pose_e;
-  tf2::fromMsg(pose, pose_e);
-  removeShapeFromField(shape, pose_e);
 }
 
 void DistanceField::getPlaneMarkers(PlaneVisualizationType type, double length, double width, double height,
@@ -480,24 +462,30 @@ void DistanceField::getProjectionPlanes(const std::string& frame_id, const rclcp
   double initial_val = sqrt(INT_MAX);
 
   // Initialize
-  for (int y = 0; y < max_y_cell; y++)
-    for (int x = 0; x < max_x_cell; x++)
+  for (int y = 0; y < max_y_cell; ++y)
+  {
+    for (int x = 0; x < max_x_cell; ++x)
       z_projection[x + y * max_x_cell] = initial_val;
+  }
 
-  for (int z = 0; z < max_z_cell; z++)
-    for (int y = 0; y < max_y_cell; y++)
+  for (int z = 0; z < max_z_cell; ++z)
+  {
+    for (int y = 0; y < max_y_cell; ++y)
       x_projection[y + z * max_y_cell] = initial_val;
+  }
 
-  for (int z = 0; z < max_z_cell; z++)
-    for (int x = 0; x < max_x_cell; x++)
+  for (int z = 0; z < max_z_cell; ++z)
+  {
+    for (int x = 0; x < max_x_cell; ++x)
       y_projection[x + z * max_x_cell] = initial_val;
+  }
 
   // Calculate projections
-  for (int z = 0; z < max_z_cell; z++)
+  for (int z = 0; z < max_z_cell; ++z)
   {
-    for (int y = 0; y < max_y_cell; y++)
+    for (int y = 0; y < max_y_cell; ++y)
     {
-      for (int x = 0; x < max_x_cell; x++)
+      for (int x = 0; x < max_x_cell; ++x)
       {
         double dist = getDistance(x, y, z);
         z_projection[x + y * max_x_cell] = std::min(dist, z_projection[x + y * max_x_cell]);
@@ -527,9 +515,9 @@ void DistanceField::getProjectionPlanes(const std::string& frame_id, const rclcp
   marker.colors.resize(max_x_cell * max_y_cell + max_y_cell * max_z_cell + max_z_cell * max_x_cell);
 
   z = 0;
-  for (y = 0; y < max_y_cell; y++)
+  for (y = 0; y < max_y_cell; ++y)
   {
-    for (x = 0; x < max_x_cell; x++)
+    for (x = 0; x < max_x_cell; ++x)
     {
       double dist = z_projection[x + y * max_x_cell];
       setPoint(x, y, z, dist, marker.points[index], marker.colors[index], max_dist);
@@ -538,9 +526,9 @@ void DistanceField::getProjectionPlanes(const std::string& frame_id, const rclcp
   }
 
   x = 0;
-  for (z = 0; z < max_z_cell; z++)
+  for (z = 0; z < max_z_cell; ++z)
   {
-    for (y = 0; y < max_y_cell; y++)
+    for (y = 0; y < max_y_cell; ++y)
     {
       double dist = x_projection[y + z * max_y_cell];
       setPoint(x, y, z, dist, marker.points[index], marker.colors[index], max_dist);
@@ -549,9 +537,9 @@ void DistanceField::getProjectionPlanes(const std::string& frame_id, const rclcp
   }
 
   y = 0;
-  for (z = 0; z < max_z_cell; z++)
+  for (z = 0; z < max_z_cell; ++z)
   {
-    for (x = 0; x < max_x_cell; x++)
+    for (x = 0; x < max_x_cell; ++x)
     {
       double dist = y_projection[x + z * max_x_cell];
       setPoint(x, y, z, dist, marker.points[index], marker.colors[index], max_dist);

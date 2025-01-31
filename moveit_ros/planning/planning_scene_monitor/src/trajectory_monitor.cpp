@@ -34,19 +34,28 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/planning_scene_monitor/trajectory_monitor.h>
-#include <moveit/trajectory_processing/trajectory_tools.h>
-#include <rclcpp/rate.hpp>
+#include <moveit/planning_scene_monitor/trajectory_monitor.hpp>
+#include <moveit/planning_scene_monitor/trajectory_monitor_middleware_handle.hpp>
+#include <moveit/trajectory_processing/trajectory_tools.hpp>
 #include <limits>
 #include <memory>
-
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_ros.planning_scene_monitor.trajectory_monitor");
+#include <moveit/utils/logger.hpp>
 
 planning_scene_monitor::TrajectoryMonitor::TrajectoryMonitor(const CurrentStateMonitorConstPtr& state_monitor,
                                                              double sampling_frequency)
+  : TrajectoryMonitor(state_monitor, std::make_unique<TrajectoryMonitorMiddlewareHandle>(sampling_frequency),
+                      sampling_frequency)
+{
+}
+
+planning_scene_monitor::TrajectoryMonitor::TrajectoryMonitor(
+    const CurrentStateMonitorConstPtr& state_monitor,
+    std::unique_ptr<TrajectoryMonitor::MiddlewareHandle> middleware_handle, double sampling_frequency)
   : current_state_monitor_(state_monitor)
+  , middleware_handle_(std::move(middleware_handle))
   , sampling_frequency_(sampling_frequency)
   , trajectory_(current_state_monitor_->getRobotModel(), "")
+  , logger_(moveit::getLogger("moveit.ros.trajectory_monitor"))
 {
   setSamplingFrequency(sampling_frequency);
 }
@@ -58,13 +67,17 @@ planning_scene_monitor::TrajectoryMonitor::~TrajectoryMonitor()
 
 void planning_scene_monitor::TrajectoryMonitor::setSamplingFrequency(double sampling_frequency)
 {
-  if (sampling_frequency != sampling_frequency_)
+  if (sampling_frequency == sampling_frequency_)
     return;  // silently return if nothing changes
 
   if (sampling_frequency <= std::numeric_limits<double>::epsilon())
-    RCLCPP_ERROR(LOGGER, "The sampling frequency for trajectory states should be positive");
+  {
+    RCLCPP_ERROR(logger_, "The sampling frequency for trajectory states should be positive");
+  }
   else
-    RCLCPP_DEBUG(LOGGER, "Setting trajectory sampling frequency to %.1f", sampling_frequency);
+  {
+    RCLCPP_DEBUG(logger_, "Setting trajectory sampling frequency to %.1f", sampling_frequency);
+  }
   sampling_frequency_ = sampling_frequency;
 }
 
@@ -77,8 +90,8 @@ void planning_scene_monitor::TrajectoryMonitor::startTrajectoryMonitor()
 {
   if (sampling_frequency_ > std::numeric_limits<double>::epsilon() && !record_states_thread_)
   {
-    record_states_thread_.reset(new boost::thread(boost::bind(&TrajectoryMonitor::recordStates, this)));
-    RCLCPP_DEBUG(LOGGER, "Started trajectory monitor");
+    record_states_thread_ = std::make_unique<std::thread>([this] { recordStates(); });
+    RCLCPP_DEBUG(logger_, "Started trajectory monitor");
   }
 }
 
@@ -86,10 +99,10 @@ void planning_scene_monitor::TrajectoryMonitor::stopTrajectoryMonitor()
 {
   if (record_states_thread_)
   {
-    std::unique_ptr<boost::thread> copy;
+    std::unique_ptr<std::thread> copy;
     copy.swap(record_states_thread_);
     copy->join();
-    RCLCPP_DEBUG(LOGGER, "Stopped trajectory monitor");
+    RCLCPP_DEBUG(logger_, "Stopped trajectory monitor");
   }
 }
 
@@ -108,11 +121,11 @@ void planning_scene_monitor::TrajectoryMonitor::recordStates()
   if (!current_state_monitor_)
     return;
 
-  rclcpp::Rate rate(sampling_frequency_);
+  middleware_handle_->setRate(sampling_frequency_);
 
   while (record_states_thread_)
   {
-    rate.sleep();
+    middleware_handle_->sleep();
     std::pair<moveit::core::RobotStatePtr, rclcpp::Time> state = current_state_monitor_->getCurrentStateAndTime();
     if (trajectory_.empty())
     {

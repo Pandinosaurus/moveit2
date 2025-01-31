@@ -34,16 +34,24 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/rviz_plugin_render_tools/robot_state_visualization.h>
-#include <moveit/rviz_plugin_render_tools/planning_link_updater.h>
-#include <moveit/rviz_plugin_render_tools/render_shapes.h>
+#include <moveit/rviz_plugin_render_tools/robot_state_visualization.hpp>
+#include <moveit/rviz_plugin_render_tools/planning_link_updater.hpp>
+#include <moveit/rviz_plugin_render_tools/render_shapes.hpp>
 #include <rviz_common/properties/parse_color.hpp>
 #include <rviz_default_plugins/robot/robot_link.hpp>
 #include <QApplication>
+#include <moveit/utils/logger.hpp>
 
 namespace moveit_rviz_plugin
 {
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit.rviz_plugin_render_tools.robot_state_visualization");
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.ros.rviz_plugin_render_tools.robot_state_visualization");
+}
+}  // namespace
+
 RobotStateVisualization::RobotStateVisualization(Ogre::SceneNode* root_node, rviz_common::DisplayContext* context,
                                                  const std::string& name,
                                                  rviz_common::properties::Property* parent_property)
@@ -58,7 +66,7 @@ RobotStateVisualization::RobotStateVisualization(Ogre::SceneNode* root_node, rvi
   default_attached_object_color_.g = 0.7f;
   default_attached_object_color_.b = 0.0f;
   default_attached_object_color_.a = 1.0f;
-  render_shapes_.reset(new RenderShapes(context));
+  render_shapes_ = std::make_shared<RenderShapes>(context);
 }
 
 void RobotStateVisualization::load(const urdf::ModelInterface& descr, bool visual, bool collision)
@@ -89,56 +97,54 @@ void RobotStateVisualization::updateAttachedObjectColors(const std_msgs::msg::Co
                                     robot_.getAlpha());
 }
 
-void RobotStateVisualization::update(const moveit::core::RobotStateConstPtr& kinematic_state)
+void RobotStateVisualization::update(const moveit::core::RobotStateConstPtr& robot_state)
 {
-  updateHelper(kinematic_state, default_attached_object_color_, nullptr);
+  updateHelper(robot_state, default_attached_object_color_, nullptr);
 }
 
-void RobotStateVisualization::update(const moveit::core::RobotStateConstPtr& kinematic_state,
+void RobotStateVisualization::update(const moveit::core::RobotStateConstPtr& robot_state,
                                      const std_msgs::msg::ColorRGBA& default_attached_object_color)
 {
-  updateHelper(kinematic_state, default_attached_object_color, nullptr);
+  updateHelper(robot_state, default_attached_object_color, nullptr);
 }
 
-void RobotStateVisualization::update(const moveit::core::RobotStateConstPtr& kinematic_state,
+void RobotStateVisualization::update(const moveit::core::RobotStateConstPtr& robot_state,
                                      const std_msgs::msg::ColorRGBA& default_attached_object_color,
                                      const std::map<std::string, std_msgs::msg::ColorRGBA>& color_map)
 {
-  updateHelper(kinematic_state, default_attached_object_color, &color_map);
+  updateHelper(robot_state, default_attached_object_color, &color_map);
 }
 
-void RobotStateVisualization::updateHelper(const moveit::core::RobotStateConstPtr& kinematic_state,
+void RobotStateVisualization::updateHelper(const moveit::core::RobotStateConstPtr& robot_state,
                                            const std_msgs::msg::ColorRGBA& default_attached_object_color,
                                            const std::map<std::string, std_msgs::msg::ColorRGBA>* color_map)
 {
-  robot_.update(PlanningLinkUpdater(kinematic_state));
+  robot_.update(PlanningLinkUpdater(robot_state));
   render_shapes_->clear();
 
   std::vector<const moveit::core::AttachedBody*> attached_bodies;
-  kinematic_state->getAttachedBodies(attached_bodies);
+  robot_state->getAttachedBodies(attached_bodies);
   for (const moveit::core::AttachedBody* attached_body : attached_bodies)
   {
     std_msgs::msg::ColorRGBA color = default_attached_object_color;
-    float alpha = robot_.getAlpha();
+    double alpha = robot_.getAlpha();
     if (color_map)
     {
       std::map<std::string, std_msgs::msg::ColorRGBA>::const_iterator it = color_map->find(attached_body->getName());
       if (it != color_map->end())
-      {  // render attached bodies with a color that is a bit different
-        color.r = std::max(1.0f, it->second.r * 1.05f);
-        color.g = std::max(1.0f, it->second.g * 1.05f);
-        color.b = std::max(1.0f, it->second.b * 1.05f);
-        alpha = color.a = it->second.a;
+      {
+        color = it->second;
+        alpha = color.a;
       }
     }
     rviz_default_plugins::robot::RobotLink* link = robot_.getLink(attached_body->getAttachedLinkName());
     if (!link)
     {
-      RCLCPP_ERROR_STREAM(LOGGER, "Link " << attached_body->getAttachedLinkName() << " not found in rviz::Robot");
+      RCLCPP_ERROR_STREAM(getLogger(), "Link " << attached_body->getAttachedLinkName() << " not found in rviz::Robot");
       continue;
     }
-    Ogre::ColourValue rcolor(color.r, color.g, color.b);
-    const EigenSTL::vector_Isometry3d& ab_t = attached_body->getFixedTransforms();
+    Ogre::ColourValue rcolor(color.r, color.g, color.b, color.a);
+    const EigenSTL::vector_Isometry3d& ab_t = attached_body->getShapePosesInLinkFrame();
     const std::vector<shapes::ShapeConstPtr>& ab_shapes = attached_body->getShapes();
     for (std::size_t j = 0; j < ab_shapes.size(); ++j)
     {
@@ -153,9 +159,9 @@ void RobotStateVisualization::updateHelper(const moveit::core::RobotStateConstPt
   robot_.setVisible(visible_);
 }
 
-void RobotStateVisualization::updateKinematicState(const moveit::core::RobotStateConstPtr& kinematic_state)
+void RobotStateVisualization::updateKinematicState(const moveit::core::RobotStateConstPtr& robot_state)
 {
-  robot_.update(PlanningLinkUpdater(kinematic_state));
+  robot_.update(PlanningLinkUpdater(robot_state));
 }
 
 void RobotStateVisualization::setVisible(bool visible)
@@ -176,7 +182,7 @@ void RobotStateVisualization::setCollisionVisible(bool visible)
   robot_.setCollisionVisible(visible);
 }
 
-void RobotStateVisualization::setAlpha(float alpha)
+void RobotStateVisualization::setAlpha(double alpha)
 {
   robot_.setAlpha(alpha);
 }

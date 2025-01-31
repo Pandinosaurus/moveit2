@@ -34,13 +34,22 @@
 
 /* Author: Mark Moll */
 
-#include <boost/filesystem/fstream.hpp>
 #include <numeric>
+#include <filesystem>
+#include <fstream>
 
-#include <moveit/cached_ik_kinematics_plugin/cached_ik_kinematics_plugin.h>
+#include <moveit/cached_ik_kinematics_plugin/cached_ik_kinematics_plugin.hpp>
+#include <moveit/utils/logger.hpp>
 
 namespace cached_ik_kinematics_plugin
 {
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.core.dynamics_solver");
+}
+}  // namespace
 IKCache::IKCache()
 {
   // set distance function for nearest-neighbor queries
@@ -72,9 +81,10 @@ void IKCache::initializeCache(const std::string& robot_id, const std::string& gr
   // use mutex lock for rest of initialization
   std::lock_guard<std::mutex> slock(lock_);
   // determine cache file name
-  boost::filesystem::path prefix(!cached_ik_path.empty() ? cached_ik_path : boost::filesystem::current_path());
+  std::filesystem::path prefix(!cached_ik_path.empty() ? std::filesystem::path(cached_ik_path) :
+                                                         std::filesystem::current_path());
   // create cache directory if necessary
-  boost::filesystem::create_directories(prefix);
+  std::filesystem::create_directories(prefix);
 
   cache_file_name_ = prefix / (robot_id + group_name + "_" + cache_name + "_" + std::to_string(max_cache_size_) + "_" +
                                std::to_string(min_pose_distance_) + "_" +
@@ -83,18 +93,18 @@ void IKCache::initializeCache(const std::string& robot_id, const std::string& gr
   ik_cache_.clear();
   ik_nn_.clear();
   last_saved_cache_size_ = 0;
-  if (boost::filesystem::exists(cache_file_name_))
+  if (std::filesystem::exists(cache_file_name_))
   {
     // read cache
-    boost::filesystem::ifstream cache_file(cache_file_name_, std::ios_base::binary | std::ios_base::in);
-    cache_file.read((char*)&last_saved_cache_size_, sizeof(unsigned int));
+    std::ifstream cache_file(cache_file_name_, std::ios_base::binary | std::ios_base::in);
+    cache_file.read(reinterpret_cast<char*>(&last_saved_cache_size_), sizeof(unsigned int));
     unsigned int num_dofs;
-    cache_file.read((char*)&num_dofs, sizeof(unsigned int));
+    cache_file.read(reinterpret_cast<char*>(&num_dofs), sizeof(unsigned int));
     unsigned int num_tips;
-    cache_file.read((char*)&num_tips, sizeof(unsigned int));
+    cache_file.read(reinterpret_cast<char*>(&num_tips), sizeof(unsigned int));
 
-    RCLCPP_INFO(LOGGER, "Found %d IK solutions for a %d-dof system with %d end effectors in %s", last_saved_cache_size_,
-                num_dofs, num_tips, cache_file_name_.string().c_str());
+    RCLCPP_INFO(getLogger(), "Found %d IK solutions for a %d-dof system with %d end effectors in %s",
+                last_saved_cache_size_, num_dofs, num_tips, cache_file_name_.string().c_str());
 
     unsigned int position_size = 3 * sizeof(tf2Scalar);
     unsigned int orientation_size = 4 * sizeof(tf2Scalar);
@@ -121,9 +131,9 @@ void IKCache::initializeCache(const std::string& robot_id, const std::string& gr
       memcpy(&entry.second[0], buffer + offset_conf, config_size);
       ik_cache_.push_back(entry);
     }
-    RCLCPP_INFO(LOGGER, "freeing buffer");
+    RCLCPP_INFO(getLogger(), "freeing buffer");
     delete[] buffer;
-    RCLCPP_INFO(LOGGER, "freed buffer");
+    RCLCPP_INFO(getLogger(), "freed buffer");
     std::vector<IKEntry*> ik_entry_ptrs(last_saved_cache_size_);
     for (unsigned int i = 0; i < last_saved_cache_size_; ++i)
       ik_entry_ptrs[i] = &ik_cache_[i];
@@ -132,7 +142,7 @@ void IKCache::initializeCache(const std::string& robot_id, const std::string& gr
 
   num_joints_ = num_joints;
 
-  RCLCPP_INFO(LOGGER, "cache file %s initialized!", cache_file_name_.string().c_str());
+  RCLCPP_INFO(getLogger(), "cache file %s initialized!", cache_file_name_.string().c_str());
 }
 
 double IKCache::configDistance2(const std::vector<double>& config1, const std::vector<double>& config2) const
@@ -214,11 +224,11 @@ void IKCache::updateCache(const IKEntry& nearest, const std::vector<Pose>& poses
 void IKCache::saveCache() const
 {
   if (cache_file_name_.empty())
-    RCLCPP_ERROR(LOGGER, "can't save cache before initialization");
+    RCLCPP_ERROR(getLogger(), "can't save cache before initialization");
 
-  RCLCPP_INFO(LOGGER, "writing %ld IK solutions to %s", ik_cache_.size(), cache_file_name_.string().c_str());
+  RCLCPP_INFO(getLogger(), "writing %ld IK solutions to %s", ik_cache_.size(), cache_file_name_.string().c_str());
 
-  boost::filesystem::ofstream cache_file(cache_file_name_, std::ios_base::binary | std::ios_base::out);
+  std::ofstream cache_file(cache_file_name_, std::ios_base::binary | std::ios_base::out);
   unsigned int position_size = 3 * sizeof(tf2Scalar);
   unsigned int orientation_size = 4 * sizeof(tf2Scalar);
   unsigned int pose_size = position_size + orientation_size;
@@ -230,10 +240,10 @@ void IKCache::saveCache() const
 
   // write number of IK entries and size of each configuration first
   last_saved_cache_size_ = ik_cache_.size();
-  cache_file.write((char*)&last_saved_cache_size_, sizeof(unsigned int));
+  cache_file.write(reinterpret_cast<char*>(&last_saved_cache_size_), sizeof(unsigned int));
   unsigned int sz = ik_cache_[0].second.size();
-  cache_file.write((char*)&sz, sizeof(unsigned int));
-  cache_file.write((char*)&num_tips, sizeof(unsigned int));
+  cache_file.write(reinterpret_cast<char*>(&sz), sizeof(unsigned int));
+  cache_file.write(reinterpret_cast<char*>(&num_tips), sizeof(unsigned int));
   for (const auto& entry : ik_cache_)
   {
     for (unsigned int i = 0; i < num_tips; ++i)
@@ -260,13 +270,13 @@ void IKCache::verifyCache(kdl_kinematics_plugin::KDLKinematicsPlugin& fk) const
     for (unsigned int i = 0; i < poses.size(); ++i)
       error += entry.first[i].distance(poses[i]);
     if (!poses.empty())
-      error /= (double)poses.size();
+      error /= static_cast<double>(poses.size());
     if (error > max_error)
       max_error = error;
     if (error > 1e-4)
-      RCLCPP_ERROR(LOGGER, "Cache entry is invalid, error = %g", error);
+      RCLCPP_ERROR(getLogger(), "Cache entry is invalid, error = %g", error);
   }
-  RCLCPP_INFO(LOGGER, "Max. error in cache entries is %g", max_error);
+  RCLCPP_INFO(getLogger(), "Max. error in cache entries is %g", max_error);
 }
 
 IKCache::Pose::Pose(const geometry_msgs::msg::Pose& pose)
@@ -300,7 +310,9 @@ const IKCache::IKEntry& IKCacheMap::getBestApproximateIKSolution(const std::vect
   auto key(getKey(fixed, active));
   auto it = find(key);
   if (it != end())
+  {
     return it->second->getBestApproximateIKSolution(poses);
+  }
   else
   {
     static IKEntry dummy = std::make_pair(poses, std::vector<double>(num_joints_, 0.));
@@ -315,7 +327,9 @@ void IKCacheMap::updateCache(const IKEntry& nearest, const std::vector<std::stri
   auto key(getKey(fixed, active));
   auto it = find(key);
   if (it != end())
+  {
     it->second->updateCache(nearest, poses, config);
+  }
   else
   {
     value_type val = std::make_pair(key, nullptr);

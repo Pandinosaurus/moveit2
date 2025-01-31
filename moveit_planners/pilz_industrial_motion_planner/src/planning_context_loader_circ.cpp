@@ -32,12 +32,24 @@
  *  POSSIBILITY OF SUCH DAMAGE.
  *********************************************************************/
 
-#include "pilz_industrial_motion_planner/planning_context_loader_circ.h"
-#include "moveit/planning_scene/planning_scene.h"
-#include "pilz_industrial_motion_planner/planning_context_base.h"
-#include "pilz_industrial_motion_planner/planning_context_circ.h"
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
 
-#include <pluginlib/class_list_macros.h>
+#include <pilz_industrial_motion_planner/planning_context_loader_circ.hpp>
+#include <moveit/planning_scene/planning_scene.hpp>
+#include <pilz_industrial_motion_planner/planning_context_base.hpp>
+#include <pilz_industrial_motion_planner/planning_context_circ.hpp>
+#include <moveit/utils/logger.hpp>
+
+#include <pluginlib/class_list_macros.hpp>
+
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.planners.pilz.planning_context_loader.circ");
+}
+}  // namespace
 
 pilz_industrial_motion_planner::PlanningContextLoaderCIRC::PlanningContextLoaderCIRC()
 {
@@ -53,19 +65,19 @@ bool pilz_industrial_motion_planner::PlanningContextLoaderCIRC::loadContext(
 {
   if (limits_set_ && model_set_)
   {
-    planning_context.reset(new PlanningContextCIRC(name, group, model_, limits_));
+    planning_context = std::make_shared<PlanningContextCIRC>(name, group, model_, limits_);
     return true;
   }
   else
   {
     if (!limits_set_)
     {
-      ROS_ERROR_STREAM("Limits are not defined. Cannot load planning context. "
-                       "Call setLimits loadContext");
+      RCLCPP_ERROR_STREAM(getLogger(),
+                          "Limits are not defined. Cannot load planning context. Call setLimits loadContext");
     }
     if (!model_set_)
     {
-      ROS_ERROR_STREAM("Robot model was not set");
+      RCLCPP_ERROR_STREAM(getLogger(), "Robot model was not set");
     }
     return false;
   }

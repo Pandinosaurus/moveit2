@@ -34,35 +34,58 @@
 
 /* Author: Jon Binney, Ioan Sucan */
 
-#include <memory>
-#include <rclcpp/rclcpp.hpp>
-#include <tf2_ros/transform_listener.h>
-#include <moveit/occupancy_map_monitor/occupancy_map_monitor.h>
-#include <octomap_msgs/conversions.h>
-#include <boost/bind.hpp>
+#include <moveit/occupancy_map_monitor/occupancy_map_monitor.hpp>
 
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit.ros.occupancy_map_server");
+#include <octomap_msgs/conversions.h>
+#include <tf2_ros/transform_listener.h>
+#include <rclcpp/clock.hpp>
+#include <rclcpp/executors.hpp>
+#include <rclcpp/experimental/buffers/intra_process_buffer.hpp>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <rclcpp/node.hpp>
+#include <rclcpp/publisher.hpp>
+#include <rclcpp/version.h>
+#include <moveit/utils/logger.hpp>
+#if RCLCPP_VERSION_GTE(20, 0, 0)
+#include <rclcpp/event_handler.hpp>
+#else
+#include <rclcpp/qos_event.hpp>
+#endif
+#include <rclcpp/time.hpp>
+#include <rclcpp/utilities.hpp>
+#include <memory>
+#include <sstream>
 
 static void publishOctomap(const rclcpp::Publisher<octomap_msgs::msg::Octomap>::SharedPtr& octree_binary_pub,
-                           occupancy_map_monitor::OccupancyMapMonitor* server)
+                           occupancy_map_monitor::OccupancyMapMonitor& server)
 {
   octomap_msgs::msg::Octomap map;
+  const auto logger = moveit::getLogger("moveit.ros.occupancy_map_monitor");
 
-  map.header.frame_id = server->getMapFrame();
+  map.header.frame_id = server.getMapFrame();
   map.header.stamp = rclcpp::Clock().now();
 
-  server->getOcTreePtr()->lockRead();
+  server.getOcTreePtr()->lockRead();
   rclcpp::Clock steady_clock(RCL_STEADY_TIME);
   try
   {
-    if (!octomap_msgs::binaryMapToMsgData(*server->getOcTreePtr(), map.data))
-      RCLCPP_ERROR_THROTTLE(LOGGER, steady_clock, 1000, "Could not generate OctoMap message");
+    if (!octomap_msgs::binaryMapToMsgData(*server.getOcTreePtr(), map.data))
+    {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wold-style-cast"
+      RCLCPP_ERROR_THROTTLE(logger, steady_clock, 1000, "Could not generate OctoMap message");
+#pragma GCC diagnostic pop
+    }
   }
   catch (...)
   {
-    RCLCPP_ERROR_THROTTLE(LOGGER, steady_clock, 1000, "Exception thrown while generating OctoMap message");
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wold-style-cast"
+    RCLCPP_ERROR_THROTTLE(logger, steady_clock, 1000, "Exception thrown while generating OctoMap message");
+#pragma GCC diagnostic pop
   }
-  server->getOcTreePtr()->unlockRead();
+  server.getOcTreePtr()->unlockRead();
 
   octree_binary_pub->publish(map);
 }
@@ -71,13 +94,15 @@ int main(int argc, char** argv)
 {
   rclcpp::init(argc, argv);
   auto node = rclcpp::Node::make_shared("occupancy_map_server");
+  moveit::setNodeLoggerName(node->get_name());
   auto octree_binary_pub =
       node->create_publisher<octomap_msgs::msg::Octomap>("octomap_binary", RMW_QOS_POLICY_HISTORY_KEEP_LAST);
   auto clock_ptr = std::make_shared<rclcpp::Clock>(RCL_ROS_TIME);
   std::shared_ptr<tf2_ros::Buffer> buffer = std::make_shared<tf2_ros::Buffer>(clock_ptr, tf2::durationFromSec(5.0));
-  std::shared_ptr<tf2_ros::TransformListener> listener = std::make_shared<tf2_ros::TransformListener>(*buffer, node);
+  tf2_ros::TransformListener listener(*buffer, node, false /* spin_thread - disables executor */);
   occupancy_map_monitor::OccupancyMapMonitor server(node, buffer);
-  server.setUpdateCallback(boost::bind(&publishOctomap, octree_binary_pub, &server));
+  server.setUpdateCallback(
+      [&octree_binary_pub, &server, logger = node->get_logger()] { return publishOctomap(octree_binary_pub, server); });
   server.startMonitor();
 
   rclcpp::spin(node);

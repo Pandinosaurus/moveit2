@@ -34,35 +34,47 @@
 
 /* Author: Ioan Sucan */
 
-#include <moveit/kinematic_constraints/kinematic_constraint.h>
+#include <moveit/kinematic_constraints/kinematic_constraint.hpp>
 #include <geometric_shapes/body_operations.h>
 #include <geometric_shapes/shape_operations.h>
-#include <moveit/robot_state/conversions.h>
-#include <moveit/collision_detection_fcl/collision_env_fcl.h>
+#include <moveit/robot_state/conversions.hpp>
+#include <moveit/collision_detection_fcl/collision_env_fcl.hpp>
 #include <geometric_shapes/check_isometry.h>
-#include <boost/math/constants/constants.hpp>
-#include <tf2_eigen/tf2_eigen.h>
-#include <boost/bind.hpp>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
+#include <rclcpp/time.hpp>
+#include <tf2_eigen/tf2_eigen.hpp>
+#include <functional>
 #include <limits>
+#include <math.h>
 #include <memory>
 #include <typeinfo>
+#include <moveit/utils/logger.hpp>
 
-#include "rclcpp/rclcpp.hpp"
-#include "rclcpp/clock.hpp"
-#include "rclcpp/duration.hpp"
+#include <rclcpp/clock.hpp>
+#include <rclcpp/duration.hpp>
 
 namespace kinematic_constraints
 {
-// Logger
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_kinematic_constraints.kinematic_constraints");
+namespace
+{
+rclcpp::Logger getLogger()
+{
+  return moveit::getLogger("moveit.core.kinematic_constraints");
+}
+}  // namespace
 
 static double normalizeAngle(double angle)
 {
-  double v = fmod(angle, 2.0 * boost::math::constants::pi<double>());
-  if (v < -boost::math::constants::pi<double>())
-    v += 2.0 * boost::math::constants::pi<double>();
-  else if (v > boost::math::constants::pi<double>())
-    v -= 2.0 * boost::math::constants::pi<double>();
+  double v = fmod(angle, 2.0 * M_PI);
+  if (v < -M_PI)
+  {
+    v += 2.0 * M_PI;
+  }
+  else if (v > M_PI)
+  {
+    v -= 2.0 * M_PI;
+  }
   return v;
 }
 
@@ -83,7 +95,7 @@ static double normalizeAbsoluteAngle(const double angle)
  */
 template <typename Derived>
 std::tuple<Eigen::Matrix<typename Eigen::MatrixBase<Derived>::Scalar, 3, 1>, bool>
-CalcEulerAngles(const Eigen::MatrixBase<Derived>& R)
+calcEulerAngles(const Eigen::MatrixBase<Derived>& R)
 {
   using std::atan2;
   using std::sqrt;
@@ -133,7 +145,7 @@ bool JointConstraint::configure(const moveit_msgs::msg::JointConstraint& jc)
   // testing tolerances first
   if (jc.tolerance_above < 0.0 || jc.tolerance_below < 0.0)
   {
-    RCLCPP_WARN(LOGGER, "JointConstraint tolerance values must be positive.");
+    RCLCPP_WARN(getLogger(), "JointConstraint tolerance values must be positive.");
     joint_model_ = nullptr;
     return false;
   }
@@ -141,7 +153,9 @@ bool JointConstraint::configure(const moveit_msgs::msg::JointConstraint& jc)
   joint_variable_name_ = jc.joint_name;
   local_variable_name_.clear();
   if (robot_model_->hasJointModel(joint_variable_name_))
+  {
     joint_model_ = robot_model_->getJointModel(joint_variable_name_);
+  }
   else
   {
     std::size_t pos = jc.joint_name.find_last_of('/');
@@ -162,12 +176,12 @@ bool JointConstraint::configure(const moveit_msgs::msg::JointConstraint& jc)
       // check if the joint has 1 DOF (the only kind we can handle)
       if (joint_model_->getVariableCount() == 0)
       {
-        RCLCPP_ERROR(LOGGER, "Joint '%s' has no parameters to constrain", jc.joint_name.c_str());
+        RCLCPP_ERROR(getLogger(), "Joint '%s' has no parameters to constrain", jc.joint_name.c_str());
         joint_model_ = nullptr;
       }
       else if (joint_model_->getVariableCount() > 1)
       {
-        RCLCPP_ERROR(LOGGER,
+        RCLCPP_ERROR(getLogger(),
                      "Joint '%s' has more than one parameter to constrain. "
                      "This type of constraint is not supported.",
                      jc.joint_name.c_str());
@@ -179,14 +193,16 @@ bool JointConstraint::configure(const moveit_msgs::msg::JointConstraint& jc)
       int found = -1;
       const std::vector<std::string>& local_var_names = joint_model_->getLocalVariableNames();
       for (std::size_t i = 0; i < local_var_names.size(); ++i)
+      {
         if (local_var_names[i] == local_variable_name_)
         {
           found = i;
           break;
         }
+      }
       if (found < 0)
       {
-        RCLCPP_ERROR(LOGGER, "Local variable name '%s' is not known to joint '%s'", local_variable_name_.c_str(),
+        RCLCPP_ERROR(getLogger(), "Local variable name '%s' is not known to joint '%s'", local_variable_name_.c_str(),
                      joint_model_->getName().c_str());
         joint_model_ = nullptr;
       }
@@ -228,7 +244,7 @@ bool JointConstraint::configure(const moveit_msgs::msg::JointConstraint& jc)
       {
         joint_position_ = bounds.min_position_;
         joint_tolerance_above_ = std::numeric_limits<double>::epsilon();
-        RCLCPP_WARN(LOGGER,
+        RCLCPP_WARN(getLogger(),
                     "Joint %s is constrained to be below the minimum bounds. "
                     "Assuming minimum bounds instead.",
                     jc.joint_name.c_str());
@@ -237,7 +253,7 @@ bool JointConstraint::configure(const moveit_msgs::msg::JointConstraint& jc)
       {
         joint_position_ = bounds.max_position_;
         joint_tolerance_below_ = std::numeric_limits<double>::epsilon();
-        RCLCPP_WARN(LOGGER,
+        RCLCPP_WARN(getLogger(),
                     "Joint %s is constrained to be above the maximum bounds. "
                     "Assuming maximum bounds instead.",
                     jc.joint_name.c_str());
@@ -246,7 +262,7 @@ bool JointConstraint::configure(const moveit_msgs::msg::JointConstraint& jc)
 
     if (jc.weight <= std::numeric_limits<double>::epsilon())
     {
-      RCLCPP_WARN(LOGGER, "The weight on constraint for joint '%s' is very near zero.  Setting to 1.0.",
+      RCLCPP_WARN(getLogger(), "The weight on constraint for joint '%s' is very near zero.  Setting to 1.0.",
                   jc.joint_name.c_str());
       constraint_weight_ = 1.0;
     }
@@ -262,9 +278,11 @@ bool JointConstraint::equal(const KinematicConstraint& other, double margin) con
     return false;
   const JointConstraint& o = static_cast<const JointConstraint&>(other);
   if (o.joint_model_ == joint_model_ && o.local_variable_name_ == local_variable_name_)
+  {
     return fabs(joint_position_ - o.joint_position_) <= margin &&
            fabs(joint_tolerance_above_ - o.joint_tolerance_above_) <= margin &&
            fabs(joint_tolerance_below_ - o.joint_tolerance_below_) <= margin;
+  }
   return false;
 }
 
@@ -281,10 +299,14 @@ ConstraintEvaluationResult JointConstraint::decide(const moveit::core::RobotStat
   {
     dif = normalizeAngle(current_joint_position) - joint_position_;
 
-    if (dif > boost::math::constants::pi<double>())
-      dif = 2.0 * boost::math::constants::pi<double>() - dif;
-    else if (dif < -boost::math::constants::pi<double>())
-      dif += 2.0 * boost::math::constants::pi<double>();  // we include a sign change to have dif > 0
+    if (dif > M_PI)
+    {
+      dif = 2.0 * M_PI - dif;
+    }
+    else if (dif < -M_PI)
+    {
+      dif += 2.0 * M_PI;  // we include a sign change to have dif > 0
+    }
   }
   else
     dif = current_joint_position - joint_position_;
@@ -293,11 +315,13 @@ ConstraintEvaluationResult JointConstraint::decide(const moveit::core::RobotStat
   bool result = dif <= (joint_tolerance_above_ + 2.0 * std::numeric_limits<double>::epsilon()) &&
                 dif >= (-joint_tolerance_below_ - 2.0 * std::numeric_limits<double>::epsilon());
   if (verbose)
-    RCLCPP_INFO(LOGGER,
+  {
+    RCLCPP_INFO(getLogger(),
                 "Constraint %s:: Joint name: '%s', actual value: %f, desired value: %f, "
                 "tolerance_above: %f, tolerance_below: %f",
                 result ? "satisfied" : "violated", joint_variable_name_.c_str(), current_joint_position,
                 joint_position_, joint_tolerance_above_, joint_tolerance_below_);
+  }
   return ConstraintEvaluationResult(result, constraint_weight_ * fabs(dif));
 }
 
@@ -320,17 +344,17 @@ void JointConstraint::print(std::ostream& out) const
 {
   if (joint_model_)
   {
-    out << "Joint constraint for joint " << joint_variable_name_ << ": " << std::endl;
+    out << "Joint constraint for joint " << joint_variable_name_ << ": \n";
     out << "  value = ";
     out << joint_position_ << "; ";
     out << "  tolerance below = ";
     out << joint_tolerance_below_ << "; ";
     out << "  tolerance above = ";
     out << joint_tolerance_above_ << "; ";
-    out << std::endl;
+    out << '\n';
   }
   else
-    out << "No constraint" << std::endl;
+    out << "No constraint" << '\n';
 }
 
 bool PositionConstraint::configure(const moveit_msgs::msg::PositionConstraint& pc, const moveit::core::Transforms& tf)
@@ -341,14 +365,14 @@ bool PositionConstraint::configure(const moveit_msgs::msg::PositionConstraint& p
   link_model_ = robot_model_->getLinkModel(pc.link_name);
   if (link_model_ == nullptr)
   {
-    RCLCPP_WARN(LOGGER, "Position constraint link model %s not found in kinematic model. Constraint invalid.",
+    RCLCPP_WARN(getLogger(), "Position constraint link model %s not found in kinematic model. Constraint invalid.",
                 pc.link_name.c_str());
     return false;
   }
 
   if (pc.header.frame_id.empty())
   {
-    RCLCPP_WARN(LOGGER, "No frame specified for position constraint on link '%s'!", pc.link_name.c_str());
+    RCLCPP_WARN(getLogger(), "No frame specified for position constraint on link '%s'!", pc.link_name.c_str());
     return false;
   }
 
@@ -374,7 +398,7 @@ bool PositionConstraint::configure(const moveit_msgs::msg::PositionConstraint& p
     {
       if (pc.constraint_region.primitive_poses.size() <= i)
       {
-        RCLCPP_WARN(LOGGER, "Constraint region message does not contain enough primitive poses");
+        RCLCPP_WARN(getLogger(), "Constraint region message does not contain enough primitive poses");
         continue;
       }
       Eigen::Isometry3d t;
@@ -391,7 +415,7 @@ bool PositionConstraint::configure(const moveit_msgs::msg::PositionConstraint& p
       constraint_region_.push_back(body);
     }
     else
-      RCLCPP_WARN(LOGGER, "Could not construct primitive shape %zu", i);
+      RCLCPP_WARN(getLogger(), "Could not construct primitive shape %zu", i);
   }
 
   // load meshes
@@ -402,7 +426,7 @@ bool PositionConstraint::configure(const moveit_msgs::msg::PositionConstraint& p
     {
       if (pc.constraint_region.mesh_poses.size() <= i)
       {
-        RCLCPP_WARN(LOGGER, "Constraint region message does not contain enough primitive poses");
+        RCLCPP_WARN(getLogger(), "Constraint region message does not contain enough primitive poses");
         continue;
       }
       Eigen::Isometry3d t;
@@ -419,13 +443,13 @@ bool PositionConstraint::configure(const moveit_msgs::msg::PositionConstraint& p
     }
     else
     {
-      RCLCPP_WARN(LOGGER, "Could not construct mesh shape %zu", i);
+      RCLCPP_WARN(getLogger(), "Could not construct mesh shape %zu", i);
     }
   }
 
   if (pc.weight <= std::numeric_limits<double>::epsilon())
   {
-    RCLCPP_WARN(LOGGER, "The weight on position constraint for link '%s' is near zero.  Setting to 1.0.",
+    RCLCPP_WARN(getLogger(), "The weight on position constraint for link '%s' is near zero.  Setting to 1.0.",
                 pc.link_name.c_str());
     constraint_weight_ = 1.0;
   }
@@ -467,8 +491,10 @@ bool PositionConstraint::equal(const KinematicConstraint& other, double margin) 
         return false;
     }
     for (std::size_t i = 0; i < o.constraint_region_.size(); ++i)
+    {
       if (!other_region_matches_this[i])
         return false;
+    }
     return true;
   }
   return false;
@@ -485,10 +511,10 @@ static inline ConstraintEvaluationResult finishPositionConstraintDecision(const 
   double dz = desired.z() - pt.z();
   if (verbose)
   {
-    RCLCPP_INFO(LOGGER, "Position constraint %s on link '%s'. Desired: %f, %f, %f, current: %f, %f, %f",
+    RCLCPP_INFO(getLogger(), "Position constraint %s on link '%s'. Desired: %f, %f, %f, current: %f, %f, %f",
                 result ? "satisfied" : "violated", name.c_str(), desired.x(), desired.y(), desired.z(), pt.x(), pt.y(),
                 pt.z());
-    RCLCPP_INFO(LOGGER, "Differences %g %g %g", dx, dy, dz);
+    RCLCPP_INFO(getLogger(), "Differences %g %g %g", dx, dy, dz);
   }
   return ConstraintEvaluationResult(result, weight * sqrt(dx * dx + dy * dy + dz * dz));
 }
@@ -506,11 +532,15 @@ ConstraintEvaluationResult PositionConstraint::decide(const moveit::core::RobotS
       Eigen::Isometry3d tmp = state.getFrameTransform(constraint_frame_id_) * constraint_region_pose_[i];
       bool result = constraint_region_[i]->cloneAt(tmp)->containsPoint(pt, verbose);
       if (result || (i + 1 == constraint_region_pose_.size()))
+      {
         return finishPositionConstraintDecision(pt, tmp.translation(), link_model_->getName(), constraint_weight_,
                                                 result, verbose);
+      }
       else
+      {
         finishPositionConstraintDecision(pt, tmp.translation(), link_model_->getName(), constraint_weight_, result,
                                          verbose);
+      }
     }
   }
   else
@@ -519,11 +549,15 @@ ConstraintEvaluationResult PositionConstraint::decide(const moveit::core::RobotS
     {
       bool result = constraint_region_[i]->containsPoint(pt, true);
       if (result || (i + 1 == constraint_region_.size()))
+      {
         return finishPositionConstraintDecision(pt, constraint_region_[i]->getPose().translation(),
                                                 link_model_->getName(), constraint_weight_, result, verbose);
+      }
       else
+      {
         finishPositionConstraintDecision(pt, constraint_region_[i]->getPose().translation(), link_model_->getName(),
                                          constraint_weight_, result, verbose);
+      }
     }
   }
   return ConstraintEvaluationResult(false, 0.0);
@@ -532,9 +566,13 @@ ConstraintEvaluationResult PositionConstraint::decide(const moveit::core::RobotS
 void PositionConstraint::print(std::ostream& out) const
 {
   if (enabled())
-    out << "Position constraint on link '" << link_model_->getName() << "'" << std::endl;
+  {
+    out << "Position constraint on link '" << link_model_->getName() << '\'' << '\n';
+  }
   else
-    out << "No constraint" << std::endl;
+  {
+    out << "No constraint" << '\n';
+  }
 }
 
 void PositionConstraint::clear()
@@ -559,17 +597,18 @@ bool OrientationConstraint::configure(const moveit_msgs::msg::OrientationConstra
   // clearing out any old data
   clear();
 
-  link_model_ = robot_model_->getLinkModel(oc.link_name);
+  bool found;  // just needed to silent the error message in getLinkModel()
+  link_model_ = robot_model_->getLinkModel(oc.link_name, &found);
   if (!link_model_)
   {
-    RCLCPP_WARN(LOGGER, "Could not find link model for link name %s", oc.link_name.c_str());
+    RCLCPP_WARN(getLogger(), "Could not find link model for link name %s", oc.link_name.c_str());
     return false;
   }
   Eigen::Quaterniond q;
   tf2::fromMsg(oc.orientation, q);
   if (fabs(q.norm() - 1.0) > 1e-3)
   {
-    RCLCPP_WARN(LOGGER,
+    RCLCPP_WARN(getLogger(),
                 "Orientation constraint for link '%s' is probably incorrect: %f, %f, %f, "
                 "%f. Assuming identity instead.",
                 oc.link_name.c_str(), oc.orientation.x, oc.orientation.y, oc.orientation.z, oc.orientation.w);
@@ -577,8 +616,9 @@ bool OrientationConstraint::configure(const moveit_msgs::msg::OrientationConstra
   }
 
   if (oc.header.frame_id.empty())
-    RCLCPP_WARN(LOGGER, "No frame specified for position constraint on link '%s'!", oc.link_name.c_str());
+    RCLCPP_WARN(getLogger(), "No frame specified for position constraint on link '%s'!", oc.link_name.c_str());
 
+  desired_R_in_frame_id_ = Eigen::Quaterniond(q);  // desired rotation wrt. frame_id
   if (tf.isFixedFrame(oc.header.frame_id))
   {
     tf.transformQuaternion(oc.header.frame_id, q, q);
@@ -595,26 +635,39 @@ bool OrientationConstraint::configure(const moveit_msgs::msg::OrientationConstra
   }
   std::stringstream matrix_str;
   matrix_str << desired_rotation_matrix_;
-  RCLCPP_DEBUG(LOGGER, "The desired rotation matrix for link '%s' in frame %s is:\n%s", oc.link_name.c_str(),
+  RCLCPP_DEBUG(getLogger(), "The desired rotation matrix for link '%s' in frame %s is:\n%s", oc.link_name.c_str(),
                desired_rotation_frame_id_.c_str(), matrix_str.str().c_str());
 
   if (oc.weight <= std::numeric_limits<double>::epsilon())
   {
-    RCLCPP_WARN(LOGGER, "The weight on position constraint for link '%s' is near zero.  Setting to 1.0.",
+    RCLCPP_WARN(getLogger(), "The weight on orientation constraint for link '%s' is near zero.  Setting to 1.0.",
                 oc.link_name.c_str());
     constraint_weight_ = 1.0;
   }
   else
+  {
     constraint_weight_ = oc.weight;
+  }
+
+  parameterization_type_ = oc.parameterization;
+  // validate the parameterization, set to default value if invalid
+  if (parameterization_type_ != moveit_msgs::msg::OrientationConstraint::XYZ_EULER_ANGLES &&
+      parameterization_type_ != moveit_msgs::msg::OrientationConstraint::ROTATION_VECTOR)
+  {
+    RCLCPP_WARN(getLogger(),
+                "Unknown parameterization for orientation constraint tolerance, using default (XYZ_EULER_ANGLES).");
+    parameterization_type_ = moveit_msgs::msg::OrientationConstraint::XYZ_EULER_ANGLES;
+  }
+
   absolute_x_axis_tolerance_ = fabs(oc.absolute_x_axis_tolerance);
   if (absolute_x_axis_tolerance_ < std::numeric_limits<double>::epsilon())
-    RCLCPP_WARN(LOGGER, "Near-zero value for absolute_x_axis_tolerance");
+    RCLCPP_WARN(getLogger(), "Near-zero value for absolute_x_axis_tolerance");
   absolute_y_axis_tolerance_ = fabs(oc.absolute_y_axis_tolerance);
   if (absolute_y_axis_tolerance_ < std::numeric_limits<double>::epsilon())
-    RCLCPP_WARN(LOGGER, "Near-zero value for absolute_y_axis_tolerance");
+    RCLCPP_WARN(getLogger(), "Near-zero value for absolute_y_axis_tolerance");
   absolute_z_axis_tolerance_ = fabs(oc.absolute_z_axis_tolerance);
   if (absolute_z_axis_tolerance_ < std::numeric_limits<double>::epsilon())
-    RCLCPP_WARN(LOGGER, "Near-zero value for absolute_z_axis_tolerance");
+    RCLCPP_WARN(getLogger(), "Near-zero value for absolute_z_axis_tolerance");
 
   return link_model_ != nullptr;
 }
@@ -657,82 +710,95 @@ ConstraintEvaluationResult OrientationConstraint::decide(const moveit::core::Rob
   if (!link_model_)
     return ConstraintEvaluationResult(true, 0.0);
 
-  std::tuple<Eigen::Vector3d, bool> euler_angles_error;
+  Eigen::Isometry3d diff;
   if (mobile_frame_)
   {
     // getFrameTransform() returns a valid isometry by contract
     Eigen::Matrix3d tmp = state.getFrameTransform(desired_rotation_frame_id_).linear() * desired_rotation_matrix_;
     // getGlobalLinkTransform() returns a valid isometry by contract
-    Eigen::Isometry3d diff(tmp.transpose() * state.getGlobalLinkTransform(link_model_).linear());  // valid isometry
-    euler_angles_error = CalcEulerAngles(diff.linear());
+    diff = Eigen::Isometry3d(tmp.transpose() * state.getGlobalLinkTransform(link_model_).linear());  // valid isometry
   }
   else
   {
     // diff is valid isometry by construction
-    Eigen::Isometry3d diff(desired_rotation_matrix_inv_ * state.getGlobalLinkTransform(link_model_).linear());
-    euler_angles_error = CalcEulerAngles(diff.linear());
+    diff = Eigen::Isometry3d(desired_rotation_matrix_inv_ * state.getGlobalLinkTransform(link_model_).linear());
   }
 
-  // Converting from a rotation matrix to an intrinsic XYZ euler angles have 2 singularities:
-  // pitch ~= pi/2 ==> roll + yaw = theta
-  // pitch ~= -pi/2 ==> roll - yaw = theta
-  // in those cases CalcEulerAngles will set roll (xyz(0)) to theta and yaw (xyz(2)) to zero, so for us to be able to
-  // capture yaw tolerance violation we do the following, if theta violate the absolute yaw tolerance we think of it as
-  // pure yaw rotation and set roll to zero
-  auto& xyz = std::get<Eigen::Vector3d>(euler_angles_error);
-  if (!std::get<bool>(euler_angles_error))
+  // This needs to live outside the if-block scope (as xyz_rotation points to its data).
+  std::tuple<Eigen::Vector3d, bool> euler_angles_error;
+  Eigen::Vector3d xyz_rotation;
+  if (parameterization_type_ == moveit_msgs::msg::OrientationConstraint::XYZ_EULER_ANGLES)
   {
-    if (normalizeAbsoluteAngle(xyz(0)) > absolute_z_axis_tolerance_ + std::numeric_limits<double>::epsilon())
+    euler_angles_error = calcEulerAngles(diff.linear());
+    // Converting from a rotation matrix to intrinsic XYZ Euler angles has 2 singularities:
+    // pitch ~= pi/2 ==> roll + yaw = theta
+    // pitch ~= -pi/2 ==> roll - yaw = theta
+    // in those cases calcEulerAngles will set roll (xyz_rotation(0)) to theta and yaw (xyz_rotation(2)) to zero, so for
+    // us to be able to capture yaw tolerance violations we do the following: If theta violates the absolute yaw
+    // tolerance we think of it as a pure yaw rotation and set roll to zero.
+    xyz_rotation = std::get<Eigen::Vector3d>(euler_angles_error);
+    if (!std::get<bool>(euler_angles_error))
     {
-      xyz(2) = xyz(0);
-      xyz(0) = 0;
+      if (normalizeAbsoluteAngle(xyz_rotation(0)) > absolute_z_axis_tolerance_ + std::numeric_limits<double>::epsilon())
+      {
+        xyz_rotation(2) = xyz_rotation(0);
+        xyz_rotation(0) = 0;
+      }
     }
+    // Account for angle wrapping
+    xyz_rotation = xyz_rotation.unaryExpr(&normalizeAbsoluteAngle);
   }
-  // Account for angle wrapping
-  xyz = xyz.unaryExpr(&normalizeAbsoluteAngle);
+  else if (parameterization_type_ == moveit_msgs::msg::OrientationConstraint::ROTATION_VECTOR)
+  {
+    Eigen::AngleAxisd aa(diff.linear());
+    // transform rotation vector from target frame to frame_id and take absolute values
+    xyz_rotation = (desired_R_in_frame_id_ * (aa.axis() * aa.angle())).cwiseAbs();
+  }
+  else
+  {
+    /* The parameterization type should be validated in configure, so this should never happen. */
+    RCLCPP_ERROR(getLogger(), "The parameterization type for the orientation constraints is invalid.");
+  }
 
-  // 0,1,2 corresponds to XYZ, the convention used in sampling constraints
-  bool result = xyz(2) < absolute_z_axis_tolerance_ + std::numeric_limits<double>::epsilon() &&
-                xyz(1) < absolute_y_axis_tolerance_ + std::numeric_limits<double>::epsilon() &&
-                xyz(0) < absolute_x_axis_tolerance_ + std::numeric_limits<double>::epsilon();
+  bool result = xyz_rotation(2) < absolute_z_axis_tolerance_ + std::numeric_limits<double>::epsilon() &&
+                xyz_rotation(1) < absolute_y_axis_tolerance_ + std::numeric_limits<double>::epsilon() &&
+                xyz_rotation(0) < absolute_x_axis_tolerance_ + std::numeric_limits<double>::epsilon();
 
   if (verbose)
   {
     Eigen::Quaterniond q_act(state.getGlobalLinkTransform(link_model_).linear());
     Eigen::Quaterniond q_des(desired_rotation_matrix_);
-    RCLCPP_INFO(LOGGER,
+    RCLCPP_INFO(getLogger(),
                 "Orientation constraint %s for link '%s'. Quaternion desired: %f %f %f %f, quaternion "
                 "actual: %f %f %f %f, error: x=%f, y=%f, z=%f, tolerance: x=%f, y=%f, z=%f",
                 result ? "satisfied" : "violated", link_model_->getName().c_str(), q_des.x(), q_des.y(), q_des.z(),
-                q_des.w(), q_act.x(), q_act.y(), q_act.z(), q_act.w(), xyz(0), xyz(1), xyz(2),
-                absolute_x_axis_tolerance_, absolute_y_axis_tolerance_, absolute_z_axis_tolerance_);
+                q_des.w(), q_act.x(), q_act.y(), q_act.z(), q_act.w(), xyz_rotation(0), xyz_rotation(1),
+                xyz_rotation(2), absolute_x_axis_tolerance_, absolute_y_axis_tolerance_, absolute_z_axis_tolerance_);
   }
 
-  return ConstraintEvaluationResult(result, constraint_weight_ * (xyz(0) + xyz(1) + xyz(2)));
+  return ConstraintEvaluationResult(result, constraint_weight_ * (xyz_rotation(0) + xyz_rotation(1) + xyz_rotation(2)));
 }
 
 void OrientationConstraint::print(std::ostream& out) const
 {
   if (link_model_)
   {
-    out << "Orientation constraint on link '" << link_model_->getName() << "'" << std::endl;
+    out << "Orientation constraint on link '" << link_model_->getName() << '\'' << '\n';
     Eigen::Quaterniond q_des(desired_rotation_matrix_);
-    out << "Desired orientation:" << q_des.x() << "," << q_des.y() << "," << q_des.z() << "," << q_des.w() << std::endl;
+    out << "Desired orientation:" << q_des.x() << ',' << q_des.y() << ',' << q_des.z() << ',' << q_des.w() << '\n';
   }
   else
-    out << "No constraint" << std::endl;
+    out << "No constraint" << '\n';
 }
 
 VisibilityConstraint::VisibilityConstraint(const moveit::core::RobotModelConstPtr& model)
-  : KinematicConstraint(model), collision_env_(new collision_detection::CollisionEnvFCL(model))
+  : KinematicConstraint(model), robot_model_{ model }
 {
   type_ = VISIBILITY_CONSTRAINT;
 }
 
 void VisibilityConstraint::clear()
 {
-  mobile_sensor_frame_ = false;
-  mobile_target_frame_ = false;
   target_frame_id_ = "";
   sensor_frame_id_ = "";
   sensor_pose_ = Eigen::Isometry3d::Identity();
@@ -752,11 +818,11 @@ bool VisibilityConstraint::configure(const moveit_msgs::msg::VisibilityConstrain
   target_radius_ = fabs(vc.target_radius);
 
   if (vc.target_radius <= std::numeric_limits<double>::epsilon())
-    RCLCPP_WARN(LOGGER, "The radius of the target disc that must be visible should be strictly positive");
+    RCLCPP_WARN(getLogger(), "The radius of the target disc that must be visible should be strictly positive");
 
   if (vc.cone_sides < 3)
   {
-    RCLCPP_WARN(LOGGER,
+    RCLCPP_WARN(getLogger(),
                 "The number of sides for the visibility region must be 3 or more. "
                 "Assuming 3 sides instead of the specified %d",
                 vc.cone_sides);
@@ -767,7 +833,7 @@ bool VisibilityConstraint::configure(const moveit_msgs::msg::VisibilityConstrain
 
   // compute the points on the base circle of the cone that make up the cone sides
   points_.clear();
-  double delta = 2.0 * boost::math::constants::pi<double>() / (double)cone_sides_;
+  double delta = 2.0 * M_PI / static_cast<double>(cone_sides_);
   double a = 0.0;
   for (unsigned int i = 0; i < cone_sides_; ++i, a += delta)
   {
@@ -783,15 +849,10 @@ bool VisibilityConstraint::configure(const moveit_msgs::msg::VisibilityConstrain
   {
     tf.transformPose(vc.target_pose.header.frame_id, target_pose_, target_pose_);
     target_frame_id_ = tf.getTargetFrame();
-    mobile_target_frame_ = false;
-    // transform won't change, so apply it now
-    for (Eigen::Vector3d& point : points_)
-      point = target_pose_ * point;
   }
   else
   {
     target_frame_id_ = vc.target_pose.header.frame_id;
-    mobile_target_frame_ = true;
   }
 
   tf2::fromMsg(vc.sensor_pose.pose, sensor_pose_);
@@ -801,17 +862,15 @@ bool VisibilityConstraint::configure(const moveit_msgs::msg::VisibilityConstrain
   {
     tf.transformPose(vc.sensor_pose.header.frame_id, sensor_pose_, sensor_pose_);
     sensor_frame_id_ = tf.getTargetFrame();
-    mobile_sensor_frame_ = false;
   }
   else
   {
     sensor_frame_id_ = vc.sensor_pose.header.frame_id;
-    mobile_sensor_frame_ = true;
   }
 
   if (vc.weight <= std::numeric_limits<double>::epsilon())
   {
-    RCLCPP_WARN(LOGGER, "The weight of visibility constraint is near zero.  Setting to 1.0.");
+    RCLCPP_WARN(getLogger(), "The weight of visibility constraint is near zero.  Setting to 1.0.");
     constraint_weight_ = 1.0;
   }
   else
@@ -821,7 +880,7 @@ bool VisibilityConstraint::configure(const moveit_msgs::msg::VisibilityConstrain
   max_range_angle_ = vc.max_range_angle;
   sensor_view_direction_ = vc.sensor_view_direction;
 
-  return target_radius_ > std::numeric_limits<double>::epsilon();
+  return enabled();
 }
 
 bool VisibilityConstraint::equal(const KinematicConstraint& other, double margin) const
@@ -855,28 +914,30 @@ bool VisibilityConstraint::equal(const KinematicConstraint& other, double margin
 
 bool VisibilityConstraint::enabled() const
 {
-  return target_radius_ > std::numeric_limits<double>::epsilon();
+  return (target_radius_ > std::numeric_limits<double>::epsilon()) ||
+         (max_view_angle_ > std::numeric_limits<double>::epsilon()) ||
+         (max_range_angle_ > std::numeric_limits<double>::epsilon());
 }
 
-shapes::Mesh* VisibilityConstraint::getVisibilityCone(const moveit::core::RobotState& state) const
+shapes::Mesh* VisibilityConstraint::getVisibilityCone(const Eigen::Isometry3d& tform_world_to_sensor,
+                                                      const Eigen::Isometry3d& tform_world_to_target) const
 {
   // the current pose of the sensor
+  const Eigen::Isometry3d& sp = tform_world_to_sensor;
 
-  const Eigen::Isometry3d& sp =
-      mobile_sensor_frame_ ? state.getFrameTransform(sensor_frame_id_) * sensor_pose_ : sensor_pose_;
-  const Eigen::Isometry3d& tp =
-      mobile_target_frame_ ? state.getFrameTransform(target_frame_id_) * target_pose_ : target_pose_;
+  // the current pose of the target
+  const Eigen::Isometry3d& tp = tform_world_to_target;
 
   // transform the points on the disc to the desired target frame
   const EigenSTL::vector_Vector3d* points = &points_;
   std::unique_ptr<EigenSTL::vector_Vector3d> temp_points;
-  if (mobile_target_frame_)
+
+  temp_points = std::make_unique<EigenSTL::vector_Vector3d>(points_.size());
+  for (std::size_t i = 0; i < points_.size(); ++i)
   {
-    temp_points.reset(new EigenSTL::vector_Vector3d(points_.size()));
-    for (std::size_t i = 0; i < points_.size(); ++i)
-      temp_points->at(i) = tp * points_[i];
-    points = temp_points.get();
+    temp_points->at(i) = tp * points_[i];
   }
+  points = temp_points.get();
 
   // allocate memory for a mesh to represent the visibility cone
   shapes::Mesh* m = new shapes::Mesh();
@@ -935,7 +996,13 @@ shapes::Mesh* VisibilityConstraint::getVisibilityCone(const moveit::core::RobotS
 void VisibilityConstraint::getMarkers(const moveit::core::RobotState& state,
                                       visualization_msgs::msg::MarkerArray& markers) const
 {
-  shapes::Mesh* m = getVisibilityCone(state);
+  // getFrameTransform() returns a valid isometry by contract
+  // sensor_pose_ is valid isometry (checked in configure())
+  const Eigen::Isometry3d& sp = state.getFrameTransform(sensor_frame_id_) * sensor_pose_;
+  // target_pose_ is valid isometry (checked in configure())
+  const Eigen::Isometry3d& tp = state.getFrameTransform(target_frame_id_) * target_pose_;
+
+  shapes::Mesh* m = getVisibilityCone(sp, tp);
   visualization_msgs::msg::Marker mk;
   shapes::constructMarkerFromShape(m, mk);
   delete m;
@@ -951,7 +1018,7 @@ void VisibilityConstraint::getMarkers(const moveit::core::RobotState& state,
   mk.pose.orientation.y = 0;
   mk.pose.orientation.z = 0;
   mk.pose.orientation.w = 1;
-  mk.lifetime = rclcpp::Duration(60);
+  mk.lifetime = rclcpp::Duration::from_seconds(60);
   // this scale necessary to make results look reasonable
   mk.scale.x = .01;
   mk.color.a = 1.0;
@@ -960,14 +1027,6 @@ void VisibilityConstraint::getMarkers(const moveit::core::RobotState& state,
   mk.color.b = 0.0;
 
   markers.markers.push_back(mk);
-
-  // getFrameTransform() returns a valid isometry by contract
-  // sensor_pose_ is valid isometry (checked in configure())
-  const Eigen::Isometry3d& sp =
-      mobile_sensor_frame_ ? state.getFrameTransform(sensor_frame_id_) * sensor_pose_ : sensor_pose_;
-  // target_pose_ is valid isometry (checked in configure())
-  const Eigen::Isometry3d& tp =
-      mobile_target_frame_ ? state.getFrameTransform(target_frame_id_) * target_pose_ : target_pose_;
 
   visualization_msgs::msg::Marker mka;
   mka.type = visualization_msgs::msg::Marker::ARROW;
@@ -1009,100 +1068,118 @@ void VisibilityConstraint::getMarkers(const moveit::core::RobotState& state,
 
 ConstraintEvaluationResult VisibilityConstraint::decide(const moveit::core::RobotState& state, bool verbose) const
 {
-  if (target_radius_ <= std::numeric_limits<double>::epsilon())
-    return ConstraintEvaluationResult(true, 0.0);
+  // getFrameTransform() returns a valid isometry by contract
+  // sensor_pose_ is valid isometry (checked in configure())
+  const Eigen::Isometry3d& tform_world_to_sensor = state.getFrameTransform(sensor_frame_id_) * sensor_pose_;
+  // target_pose_ is valid isometry (checked in configure())
+  const Eigen::Isometry3d& tform_world_to_target = state.getFrameTransform(target_frame_id_) * target_pose_;
 
-  if (max_view_angle_ > 0.0 || max_range_angle_ > 0.0)
+  // necessary to do subtraction as SENSOR_Z is 0 and SENSOR_X is 2
+  const Eigen::Vector3d& sensor_view_axis = tform_world_to_sensor.linear().col(2 - sensor_view_direction_);
+
+  // Check view angle constraint
+  if (max_view_angle_ > std::numeric_limits<double>::epsilon())
   {
-    // getFrameTransform() returns a valid isometry by contract
-    // sensor_pose_ is valid isometry (checked in configure())
-    const Eigen::Isometry3d& sp =
-        mobile_sensor_frame_ ? state.getFrameTransform(sensor_frame_id_) * sensor_pose_ : sensor_pose_;
-    // target_pose_ is valid isometry (checked in configure())
-    const Eigen::Isometry3d& tp =
-        mobile_target_frame_ ? state.getFrameTransform(target_frame_id_) * target_pose_ : target_pose_;
-
-    // necessary to do subtraction as SENSOR_Z is 0 and SENSOR_X is 2
-    const Eigen::Vector3d& normal2 = sp.linear().col(2 - sensor_view_direction_);
-
-    if (max_view_angle_ > 0.0)
+    const Eigen::Vector3d& normal1 = tform_world_to_target.linear().col(2) * -1.0;  // along Z axis and inverted
+    double dp = sensor_view_axis.dot(normal1);
+    double ang = acos(dp);
+    if (dp < 0.0)
     {
-      const Eigen::Vector3d& normal1 = tp.linear().col(2) * -1.0;  // along Z axis and inverted
-      double dp = normal2.dot(normal1);
-      double ang = acos(dp);
-      if (dp < 0.0)
+      if (verbose)
       {
-        if (verbose)
-          RCLCPP_INFO(LOGGER, "Visibility constraint is violated because the sensor is looking at "
-                              "the wrong side");
-        return ConstraintEvaluationResult(false, 0.0);
+        RCLCPP_INFO(getLogger(), "Visibility constraint is violated because the sensor is looking at "
+                                 "the wrong side");
       }
-      if (max_view_angle_ < ang)
-      {
-        if (verbose)
-          RCLCPP_INFO(LOGGER,
-                      "Visibility constraint is violated because the view angle is %lf "
-                      "(above the maximum allowed of %lf)",
-                      ang, max_view_angle_);
-        return ConstraintEvaluationResult(false, 0.0);
-      }
+      return ConstraintEvaluationResult(false, 0.0);
     }
-    if (max_range_angle_ > 0.0)
+    if (max_view_angle_ < ang)
     {
-      const Eigen::Vector3d& dir = (tp.translation() - sp.translation()).normalized();
-      double dp = normal2.dot(dir);
-      if (dp < 0.0)
+      if (verbose)
       {
-        if (verbose)
-          RCLCPP_INFO(LOGGER, "Visibility constraint is violated because the sensor is looking at "
-                              "the wrong side");
-        return ConstraintEvaluationResult(false, 0.0);
+        RCLCPP_INFO(getLogger(),
+                    "Visibility constraint is violated because the view angle is %lf "
+                    "(above the maximum allowed of %lf)",
+                    ang, max_view_angle_);
       }
-
-      double ang = acos(dp);
-      if (max_range_angle_ < ang)
-      {
-        if (verbose)
-          RCLCPP_INFO(LOGGER,
-                      "Visibility constraint is violated because the range angle is %lf "
-                      "(above the maximum allowed of %lf)",
-                      ang, max_range_angle_);
-        return ConstraintEvaluationResult(false, 0.0);
-      }
+      return ConstraintEvaluationResult(false, 0.0);
     }
   }
 
-  shapes::Mesh* m = getVisibilityCone(state);
-  if (!m)
-    return ConstraintEvaluationResult(false, 0.0);
-
-  // add the visibility cone as an object
-  collision_env_->getWorld()->addToObject("cone", shapes::ShapeConstPtr(m), Eigen::Isometry3d::Identity());
-
-  // check for collisions between the robot and the cone
-  collision_detection::CollisionRequest req;
-  collision_detection::CollisionResult res;
-  collision_detection::AllowedCollisionMatrix acm;
-  collision_detection::DecideContactFn fn =
-      std::bind(&VisibilityConstraint::decideContact, this, std::placeholders::_1);
-  acm.setDefaultEntry(std::string("cone"), fn);
-
-  req.contacts = true;
-  req.verbose = verbose;
-  req.max_contacts = 1;
-  collision_env_->checkRobotCollision(req, res, state, acm);
-
-  if (verbose)
+  // Check range angle constraint
+  if (max_range_angle_ > std::numeric_limits<double>::epsilon())
   {
-    std::stringstream ss;
-    m->print(ss);
-    RCLCPP_INFO(LOGGER, "Visibility constraint %ssatisfied. Visibility cone approximation:\n %s",
-                res.collision ? "not " : "", ss.str().c_str());
+    const Eigen::Vector3d& dir =
+        (tform_world_to_target.translation() - tform_world_to_sensor.translation()).normalized();
+    double dp = sensor_view_axis.dot(dir);
+    if (dp < 0.0)
+    {
+      if (verbose)
+      {
+        RCLCPP_INFO(getLogger(), "Visibility constraint is violated because the sensor is looking at "
+                                 "the wrong side");
+      }
+      return ConstraintEvaluationResult(false, 0.0);
+    }
+
+    double ang = acos(dp);
+    if (max_range_angle_ < ang)
+    {
+      if (verbose)
+      {
+        RCLCPP_INFO(getLogger(),
+                    "Visibility constraint is violated because the range angle is %lf "
+                    "(above the maximum allowed of %lf)",
+                    ang, max_range_angle_);
+      }
+      return ConstraintEvaluationResult(false, 0.0);
+    }
   }
 
-  collision_env_->getWorld()->removeObject("cone");
+  // Check visibility cone collision constraint
+  if (target_radius_ > std::numeric_limits<double>::epsilon())
+  {
+    shapes::Mesh* m = getVisibilityCone(tform_world_to_sensor, tform_world_to_target);
+    if (!m)
+    {
+      RCLCPP_ERROR(getLogger(),
+                   "Visibility constraint is violated because we could not create the visibility cone mesh.");
+      return ConstraintEvaluationResult(false, 0.0);
+    }
 
-  return ConstraintEvaluationResult(!res.collision, res.collision ? res.contacts.begin()->second.front().depth : 0.0);
+    // add the visibility cone as an object
+    const auto collision_env_local = std::make_shared<collision_detection::CollisionEnvFCL>(robot_model_);
+    collision_env_local->getWorld()->addToObject("cone", shapes::ShapeConstPtr(m), Eigen::Isometry3d::Identity());
+
+    // check for collisions between the robot and the cone
+    collision_detection::AllowedCollisionMatrix acm;
+    collision_detection::DecideContactFn fn = [this](collision_detection::Contact& contact) {
+      return decideContact(contact);
+    };
+    acm.setDefaultEntry(std::string("cone"), fn);
+
+    collision_detection::CollisionRequest req;
+    req.contacts = true;
+    req.verbose = verbose;
+    req.max_contacts = 1;
+
+    collision_detection::CollisionResult res;
+    collision_env_local->checkRobotCollision(req, res, state, acm);
+
+    if (verbose)
+    {
+      std::stringstream ss;
+      m->print(ss);
+      RCLCPP_INFO(getLogger(), "Visibility constraint %ssatisfied. Visibility cone approximation:\n %s",
+                  res.collision ? "not " : "", ss.str().c_str());
+    }
+
+    collision_env_local->getWorld()->removeObject("cone");
+
+    return ConstraintEvaluationResult(!res.collision, res.collision ? res.contacts.begin()->second.front().depth : 0.0);
+  }
+
+  // Constraint evaluation succeeded if we made it here
+  return ConstraintEvaluationResult(true, 0.0);
 }
 
 bool VisibilityConstraint::decideContact(const collision_detection::Contact& contact) const
@@ -1115,7 +1192,7 @@ bool VisibilityConstraint::decideContact(const collision_detection::Contact& con
       (moveit::core::Transforms::sameFrame(contact.body_name_1, sensor_frame_id_) ||
        moveit::core::Transforms::sameFrame(contact.body_name_1, target_frame_id_)))
   {
-    RCLCPP_DEBUG(LOGGER, "Accepted collision with either sensor or target");
+    RCLCPP_DEBUG(getLogger(), "Accepted collision with either sensor or target");
     return true;
   }
   if (contact.body_type_2 == collision_detection::BodyTypes::ROBOT_LINK &&
@@ -1123,7 +1200,7 @@ bool VisibilityConstraint::decideContact(const collision_detection::Contact& con
       (moveit::core::Transforms::sameFrame(contact.body_name_2, sensor_frame_id_) ||
        moveit::core::Transforms::sameFrame(contact.body_name_2, target_frame_id_)))
   {
-    RCLCPP_DEBUG(LOGGER, "Accepted collision with either sensor or target");
+    RCLCPP_DEBUG(getLogger(), "Accepted collision with either sensor or target");
     return true;
   }
   return false;
@@ -1134,11 +1211,11 @@ void VisibilityConstraint::print(std::ostream& out) const
   if (enabled())
   {
     out << "Visibility constraint for sensor in frame '" << sensor_frame_id_ << "' using target in frame '"
-        << target_frame_id_ << "'" << std::endl;
-    out << "Target radius: " << target_radius_ << ", using " << cone_sides_ << " sides." << std::endl;
+        << target_frame_id_ << '\'' << '\n';
+    out << "Target radius: " << target_radius_ << ", using " << cone_sides_ << " sides." << '\n';
   }
   else
-    out << "No constraint" << std::endl;
+    out << "No constraint" << '\n';
 }
 
 void KinematicConstraintSet::clear()
@@ -1254,7 +1331,7 @@ ConstraintEvaluationResult KinematicConstraintSet::decide(const moveit::core::Ro
 
 void KinematicConstraintSet::print(std::ostream& out) const
 {
-  out << kinematic_constraints_.size() << " kinematic constraints" << std::endl;
+  out << kinematic_constraints_.size() << " kinematic constraints" << '\n';
   for (const KinematicConstraintPtr& kinematic_constraint : kinematic_constraints_)
     kinematic_constraint->print(out);
 }

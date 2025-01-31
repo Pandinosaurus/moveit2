@@ -1,19 +1,27 @@
-cmake_minimum_required(VERSION 3.5)
-set(MOVEIT_LIB_NAME moveit_kinematics_base)
+add_library(moveit_kinematics_base SHARED src/kinematics_base.cpp)
+target_include_directories(
+  moveit_kinematics_base
+  PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+         $<INSTALL_INTERFACE:include/moveit_core>)
+target_link_libraries(moveit_kinematics_base moveit_macros moveit_robot_model
+                      moveit_utils)
+include(GenerateExportHeader)
+generate_export_header(moveit_kinematics_base)
+target_include_directories(
+  moveit_kinematics_base PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+)# for this library
 
-add_library(${MOVEIT_LIB_NAME} SHARED src/kinematics_base.cpp)
-set_target_properties(${MOVEIT_LIB_NAME} PROPERTIES VERSION "${${PROJECT_NAME}_VERSION}")
-
-# This line is needed to ensure that messages are done being built before this is built
+# This line ensures that messages are built before the library is built
 ament_target_dependencies(
-  ${MOVEIT_LIB_NAME}
+  moveit_kinematics_base
   rclcpp
   urdf
   urdfdom_headers
-  srdfdom moveit_msgs
+  srdfdom
+  moveit_msgs
   geometric_shapes
-  geometry_msgs
-  Boost
-)
+  geometry_msgs)
 
-install(DIRECTORY include/ DESTINATION include)
+install(DIRECTORY include/ DESTINATION include/moveit_core)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/moveit_kinematics_base_export.h
+        DESTINATION include/moveit_core)
